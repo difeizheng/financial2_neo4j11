@@ -16,21 +16,29 @@ _ECHARTS_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-html, body {{ margin: 0; padding: 0; width: 100%%; height: 100%%; overflow: hidden; background: #0f172a; }}
-#chart {{ width: 100%%; height: 100%%; }}
+html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0f172a; }}
+#chart {{ width: 100%; height: 100%; position: absolute; }}
+#error-msg {{ display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-family: sans-serif; text-align: center; font-size: 14px; }}
 </style>
 </head>
 <body>
 <div id="chart"></div>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<div id="error-msg">ECharts 加载失败，请检查网络连接</div>
+<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js" onerror="document.getElementById('error-msg').style.display='block';"></script>
 <script>
 (function() {{
+  if (typeof echarts === 'undefined') {{
+    document.getElementById('error-msg').style.display = 'block';
+    document.getElementById('error-msg').innerHTML = 'ECharts 未加载，CDN 不可达<br/>请检查网络或使用 npm 安装';
+    return;
+  }}
   var chartDom = document.getElementById('chart');
   var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
   var option = {option_json};
   myChart.setOption(option);
+  setTimeout(function() {{ myChart.resize(); myChart.resize(); }}, 200);
   window.addEventListener('resize', function() {{ myChart.resize(); }});
-  {extra_js}
+  {{extra_js}}
 }})();
 </script>
 </body>
