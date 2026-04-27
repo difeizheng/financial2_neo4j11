@@ -137,8 +137,12 @@ def _base_graph_option(
                 "show": False,
             },
             "emphasis": {
-                "focus": "adjacency",
-                "lineStyle": {"width": 3},
+                "focus": "none",
+                "itemStyle": {
+                    "color": "#22c55e",
+                    "borderColor": "#22c55e",
+                },
+                "lineStyle": {"width": 3, "color": "#22c55e"},
                 "label": {"fontSize": 12, "color": "#fff"},
             },
             "edgeSymbol": ["none", "arrow"],
@@ -523,10 +527,23 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     if (statusEl) statusEl.textContent = '深度: ' + currentDepth + ' | 节点: ' + total;
   }}
 
-  // ── Animation: nodes + edges turn green layer by layer ───────────
+  // ── Build id → dataIndex map from current chart data ────────────
+  function buildIdMap() {{
+    var opt = myChart.getOption();
+    var data = opt.series[0].data || [];
+    var map = {{}};
+    for (var i = 0; i < data.length; i++) {{
+      if (data[i] && data[i].id) map[data[i].id] = i;
+    }}
+    return map;
+  }}
+
+  // ── Animation: dispatchAction highlight/downplay layer by layer ──
   function runAnimation() {{
     clearTimers();
     animRunning = true;
+
+    var idToIdx = buildIdMap();
 
     if (currentDepth === 0 && (nodesByHop["0"] || []).length > 0) {{
       if (document.getElementById('prop-status'))
@@ -538,11 +555,8 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     var batches = [];
     for (var hop = 0; hop <= currentDepth; hop++) {{
       var key = String(hop);
-      batches.push({{
-        hop: hop,
-        nodeIds: (nodesByHop[key] || []).map(function(n) {{ return n.id; }}),
-        edgeHop: (edgesByHop[key] || []).map(function(e) {{ return {{ source: e.source, target: e.target }}; }}),
-      }});
+      var dataIndices = (nodesByHop[key] || []).map(function(n) {{ return idToIdx[n.id]; }}).filter(function(d) {{ return d !== undefined; }});
+      batches.push({{ hop: hop, indices: dataIndices }});
     }}
 
     var batchIdx = 0;
@@ -560,37 +574,24 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       var fillEl = document.getElementById('prop-progress-fill');
       var statusEl = document.getElementById('prop-status');
       if (fillEl) fillEl.style.width = pct + '%';
-      if (statusEl) statusEl.textContent = '第 ' + (batch.hop) + '/' + currentDepth + ' 跳';
+      if (statusEl) statusEl.textContent = '第 ' + batch.hop + '/' + currentDepth + ' 跳';
 
-      // Turn nodes green
-      var greenNodes = batch.nodeIds.map(function(nid) {{
-        var orig = nodeDataMap[nid];
-        return {{ id: nid, itemStyle: {{ color: '#22c55e' }}, name: orig ? orig.name : nid }};
-      }});
-      // Turn edges green
-      var greenEdges = batch.edgeHop.map(function(e) {{
-        return {{ source: e.source, target: e.target, lineStyle: {{ color: '#22c55e', width: 2 }} }};
-      }});
-
-      myChart.setOption({{
-        series: [{{ data: greenNodes, links: greenEdges }}],
+      batch.indices.forEach(function(di) {{
+        myChart.dispatchAction({{
+          type: 'highlight',
+          seriesIndex: 0,
+          dataIndex: di,
+        }});
       }});
 
       var hlTime = Math.max(100, 400 / speedMultiplier);
       animTimers.push(setTimeout(function() {{
-        // Restore original colors
-        var origNodes = batch.nodeIds.map(function(nid) {{
-          var nd = nodeDataMap[nid];
-          if (!nd) return {{}};
-          var n = {{ id: nid, name: nd.name }};
-          if (nd.itemStyle) n.itemStyle = {{ color: nd.itemStyle.color }};
-          return n;
-        }});
-        var origEdges = batch.edgeHop.map(function(e) {{
-          return {{ source: e.source, target: e.target, lineStyle: {{ color: '#475569', width: 1.5 }} }};
-        }});
-        myChart.setOption({{
-          series: [{{ data: origNodes, links: origEdges }}],
+        batch.indices.forEach(function(di) {{
+          myChart.dispatchAction({{
+            type: 'downplay',
+            seriesIndex: 0,
+            dataIndex: di,
+          }});
         }});
         batchIdx++;
         animTimers.push(setTimeout(runNextBatch, Math.max(50, 200 / speedMultiplier)));
@@ -727,7 +728,6 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
 
   addControls();
   myChart.resize();
-  // Initial render at currentDepth
-  applyDepth(currentDepth);
+  // Auto-play animation after 1.5s
   setTimeout(function() {{ runAnimation(); }}, 1500);
 """
