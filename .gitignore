@@ -33,4 +33,4 @@ node_modules/
 *.xlsx
 
 # Streamlit static files (copy from lib/)
-.static/
+static/
