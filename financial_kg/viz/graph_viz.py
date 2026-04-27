@@ -9,31 +9,39 @@ from financial_kg.models.graph import FinancialGraph
 
 
 # ── ECharts HTML template ───────────────────────────────────────────────────
+# Placeholders use {OPT_JSON} and {EXTRA_JS} — replaced via .replace(),
+# not .format(), so CSS braces stay intact.
 _ECHARTS_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-html, body {{ margin: 0; padding: 0; width: 100%%; height: 100%%; overflow: hidden; background: #0f172a; }}
-#chart {{ width: 100%%; height: 100%%; }}
+html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0f172a; }
+#chart { width: 100%; height: 100%; }
 </style>
 </head>
 <body>
 <div id="chart"></div>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script>
-(function() {{
+(function() {
   var chartDom = document.getElementById('chart');
-  var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
-  var option = {option_json};
+  var myChart = echarts.init(chartDom, null, { renderer: 'canvas' });
+  var option = {OPT_JSON};
   myChart.setOption(option);
-  window.addEventListener('resize', function() {{ myChart.resize(); }});
-  {extra_js}
-}})();
+  window.addEventListener('resize', function() { myChart.resize(); });
+  {EXTRA_JS}
+})();
 </script>
 </body>
 </html>"""
+
+
+def _render_html(option: dict, extra_js: str = "") -> str:
+    """Generate a complete ECharts HTML string."""
+    option_json = json.dumps(option, ensure_ascii=False)
+    return _ECHARTS_TEMPLATE.replace("{OPT_JSON}", option_json).replace("{EXTRA_JS}", extra_js)
 
 
 # ── Color constants ─────────────────────────────────────────────────────────
@@ -47,12 +55,6 @@ _COLORS = {
     "hop2": "#FFD54F",
     "hop3": "#FFF9C4",
 }
-
-
-def _render_html(option: dict, extra_js: str = "") -> str:
-    """Generate a complete ECharts HTML string."""
-    option_json = json.dumps(option, ensure_ascii=False)
-    return _ECHARTS_TEMPLATE.format(option_json=option_json, extra_js=extra_js)
 
 
 def _hop_color(hop: int) -> str:
@@ -482,18 +484,16 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       (edgesByHop[hop] || []).forEach(function(e) {{ showEdges.push(e); }});
     }}
     // Always show indicator summary nodes (hop=-1)
-    if (nodesByHop[-1]) {{
-      nodesByHop[-1].forEach(function(n) {{ showNodes.push(n); }});
+    if (nodesByHop["-1"]) {{
+      nodesByHop["-1"].forEach(function(n) {{ showNodes.push(n); }});
     }}
-    if (edgesByHop[-1]) {{
-      edgesByHop[-1].forEach(function(e) {{ showEdges.push(e); }});
+    if (edgesByHop["-1"]) {{
+      edgesByHop["-1"].forEach(function(e) {{ showEdges.push(e); }});
     }}
 
     myChart.setOption({{
-      series: [{{ data: showNodes, links: showEdges, replaceMerge: ['data', 'links'] }}],
-    }}, true);
-
-    setTimeout(function() {{ myChart.resize(); }}, 100);
+      series: [{{ data: showNodes, links: showEdges }}],
+    }});
 
     updateStatus();
   }}
@@ -502,9 +502,9 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     var statusEl = document.getElementById('prop-status');
     var visibleNodes = 0;
     for (var h = 0; h <= currentDepth; h++) {{
-      visibleNodes += (nodesByHop[h] || []).length;
+      visibleNodes += (nodesByHop[String(h)] || []).length;
     }}
-    var indCount = (nodesByHop[-1] || []).length;
+    var indCount = (nodesByHop["-1"] || []).length;
     var total = visibleNodes + indCount;
     if (statusEl) statusEl.textContent = '深度: ' + currentDepth + ' | 节点: ' + total;
   }}
@@ -514,7 +514,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     clearTimers();
     animRunning = true;
 
-    if (currentDepth === 0 && (nodesByHop[0] || []).length > 0) {{
+    if (currentDepth === 0 && (nodesByHop["0"] || []).length > 0) {{
       if (document.getElementById('prop-status'))
         document.getElementById('prop-status').textContent = '仅源头变化';
       animRunning = false;
@@ -523,9 +523,10 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
 
     var batches = [];
     for (var hop = 0; hop <= currentDepth; hop++) {{
+      var key = String(hop);
       batches.push({{
         hop: hop,
-        nodes: (nodesByHop[hop] || []).map(function(n) {{ return n.id; }}),
+        nodes: (nodesByHop[key] || []).map(function(n) {{ return n.id; }}),
       }});
     }}
 
