@@ -22,7 +22,7 @@ html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden
 </head>
 <body>
 <div id="chart"></div>
-<script src="/app/static/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script>
 (function() {{
   var chartDom = document.getElementById('chart');

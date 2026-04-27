@@ -31,6 +31,3 @@ financial_kg/data/snapshots/
 # Node (if any)
 node_modules/
 *.xlsx
-
-# Streamlit static files (copy from lib/)
-static/
