@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from financial_kg.storage.json_store import load_graph
 from financial_kg.storage.task_db import TaskDB
-from financial_kg.viz.graph_viz import build_indicator_graph, build_cell_subgraph
+from financial_kg.viz.graph_viz import build_indicator_graph, build_diff_propagation_graph
 
 st.set_page_config(page_title="图谱浏览", layout="wide")
 st.title("🔍 图谱浏览")
@@ -69,15 +69,33 @@ if view_mode == "Indicator/Table 层":
 
 else:
     cell_id = st.text_input("Cell ID（格式: Sheet_行_列，如 参数输入表_4_I）")
-    depth = st.slider("展开深度", 1, 5, 2)
+    col_a, col_b = st.columns(2)
+    depth = col_a.slider("传播深度", 1, 10, 5, key="explorer_hops")
+    max_nodes = col_b.slider("最大节点数", 50, 500, 200, 50, key="explorer_nodes")
     if cell_id and st.button("生成依赖子图"):
         if cell_id not in graph.cells:
             st.error(f"Cell {cell_id!r} 不存在")
         else:
             with st.spinner("渲染中..."):
-                html = build_cell_subgraph(graph, cell_id, depth=depth)
-            components.html(html, height=620, scrolling=False)
+                html = build_diff_propagation_graph(
+                    graph,
+                    root_cell_id=cell_id,
+                    max_hops=depth,
+                    max_nodes=max_nodes,
+                )
+            st.session_state["_explorer_graph_html"] = html
+            st.session_state["_explorer_graph_stats"] = {
+                "hops": depth,
+                "nodes": max_nodes,
+            }
+
+            graph_html = st.session_state.get("_explorer_graph_html")
+            if graph_html:
+                st.caption("图谱预览（图谱内部控制面板可切换全屏）")
+                components.html(graph_html, height=720, scrolling=False)
 
             cell = graph.cells[cell_id]
+            stats = st.session_state.get("_explorer_graph_stats", {})
             st.write(f"**值**: {cell.value}  |  **公式**: `{cell.formula_raw or '无'}`")
-            st.write(f"**依赖**: {len(cell.dependencies)} 个上游  |  **被依赖**: {len(cell.dependents)} 个下游")
+            st.write(f"**依赖**: {len(cell.dependencies)} 个上游  |  **被依赖**: {len(cell.dependents)} 个下游 "
+                     f"（传播深度={stats.get('hops', '?')}, 最大节点={stats.get('nodes', '?')}）")
