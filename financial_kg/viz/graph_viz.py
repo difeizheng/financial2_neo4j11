@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import html as html_mod
 from collections import deque
 from typing import Optional
 
@@ -16,29 +15,21 @@ _ECHARTS_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0f172a; }}
-#chart {{ width: 100%; height: 100%; position: absolute; }}
-#error-msg {{ display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-family: sans-serif; text-align: center; font-size: 14px; }}
+html, body {{ margin: 0; padding: 0; width: 100%%; height: 100%%; overflow: hidden; background: #0f172a; }}
+#chart {{ width: 100%%; height: 100%%; }}
 </style>
 </head>
 <body>
 <div id="chart"></div>
-<div id="error-msg">ECharts 加载失败，请检查网络连接</div>
-<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js" onerror="document.getElementById('error-msg').style.display='block';"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script>
 (function() {{
-  if (typeof echarts === 'undefined') {{
-    document.getElementById('error-msg').style.display = 'block';
-    document.getElementById('error-msg').innerHTML = 'ECharts 未加载，CDN 不可达<br/>请检查网络或使用 npm 安装';
-    return;
-  }}
   var chartDom = document.getElementById('chart');
   var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
   var option = {option_json};
   myChart.setOption(option);
-  setTimeout(function() {{ myChart.resize(); myChart.resize(); }}, 200);
   window.addEventListener('resize', function() {{ myChart.resize(); }});
-  {{extra_js}}
+  {extra_js}
 }})();
 </script>
 </body>
@@ -62,6 +53,28 @@ def _render_html(option: dict, extra_js: str = "") -> str:
     """Generate a complete ECharts HTML string."""
     option_json = json.dumps(option, ensure_ascii=False)
     return _ECHARTS_TEMPLATE.format(option_json=option_json, extra_js=extra_js)
+
+
+def _hop_color(hop: int) -> str:
+    if hop == 0:
+        return _COLORS["seed"]
+    elif hop == 1:
+        return _COLORS["hop1"]
+    elif hop == 2:
+        return _COLORS["hop2"]
+    else:
+        return _COLORS["hop3"]
+
+
+def _hop_size(hop: int) -> int:
+    if hop == 0:
+        return 22
+    elif hop == 1:
+        return 18
+    elif hop == 2:
+        return 15
+    else:
+        return 12
 
 
 def _base_graph_option(
@@ -100,10 +113,11 @@ def _base_graph_option(
             "data": nodes,
             "links": edges,
             "force": {
-                "repulsion": 400,
-                "gravity": 0.08,
-                "edgeLength": [80, 160],
+                "repulsion": 500,
+                "gravity": 0.15,
+                "edgeLength": [80, 150],
                 "layoutAnimation": True,
+                "friction": 0.5,
             },
             "label": {
                 "show": True,
@@ -149,7 +163,6 @@ def build_indicator_graph(
     added_tables: set[str] = set()
     added_inds: set[str] = set()
 
-    # Table nodes
     for tbl_id, tbl in graph.tables.items():
         if sheet_filter and tbl.sheet != sheet_filter:
             continue
@@ -167,7 +180,6 @@ def build_indicator_graph(
         added_tables.add(tbl_id)
         node_count += 1
 
-    # Indicator nodes
     for ind_id, ind in graph.indicators.items():
         if sheet_filter and ind.sheet != sheet_filter:
             continue
@@ -189,7 +201,6 @@ def build_indicator_graph(
         added_inds.add(ind_id)
         node_count += 1
 
-    # CALCULATES_FROM edges
     for ind_id, ind in graph.indicators.items():
         if ind_id not in added_inds:
             continue
@@ -197,7 +208,6 @@ def build_indicator_graph(
             if dep_id in added_inds:
                 edges.append({"source": ind_id, "target": dep_id})
 
-    # FEEDS_INTO edges
     for tbl_id, tbl in graph.tables.items():
         if tbl_id not in added_tables:
             continue
@@ -219,7 +229,6 @@ def build_cell_subgraph(
     if root_cell_id not in g:
         raise ValueError(f"Cell {root_cell_id!r} not in graph")
 
-    # BFS up to `depth` hops in both directions
     neighbors: set[str] = {root_cell_id}
     frontier = {root_cell_id}
     for _ in range(depth):
@@ -265,7 +274,6 @@ def build_cell_subgraph(
 
     option = _base_graph_option(nodes, edges)
 
-    # Click handler: navigate to cell detail via URL query param
     extra_js = """
   myChart.on('click', function(params) {
     if (params.componentType === 'series' && params.data && params.data.id) {
@@ -283,27 +291,30 @@ def build_diff_propagation_graph(
     changed_cell_ids: set[str],
     max_hops: int = 5,
     max_nodes: int = 300,
+    speed: float = 1.0,
 ) -> str:
-    """Generate ECharts HTML with hop-by-hop propagation animation.
+    """Generate ECharts HTML with propagation animation.
 
-    Edge direction: A -> B means "A depends on B".
-    When B changes, A is affected. Follow predecessors to find propagation.
+    Generates FULL graph (up to max_hops=10). Frontend filters by depth slider.
+    Animation respects the current depth slider value.
     """
     g = graph.cell_graph
-    visited: dict[str, int] = {}  # cell_id -> hop distance (0 = seed)
+
+    # Always compute up to hop 10 for full flexibility
+    COMPUTE_MAX_HOPS = 10
+
+    visited: dict[str, int] = {}
     queue: deque[str] = deque()
 
-    # Seeds at hop 0
     for cid in changed_cell_ids:
         if cid in g:
             visited[cid] = 0
             queue.append(cid)
 
-    # BFS through predecessors — strict max_hops limit
     while queue:
         node = queue.popleft()
         hop = visited[node]
-        if hop >= max_hops:
+        if hop >= COMPUTE_MAX_HOPS:
             continue
         for pred in g.predecessors(node):
             if pred not in visited:
@@ -319,37 +330,15 @@ def build_diff_propagation_graph(
 
     subg = g.subgraph(visited)
 
-    # Collect affected indicator IDs
     affected_indicators: set[str] = set()
     for cid in visited:
         cell = graph.cells.get(cid)
         if cell and cell.indicator_id:
             affected_indicators.add(cell.indicator_id)
 
-    # ── Build ECharts nodes ─────────────────────────────────────────────────
+    # ── Build nodes ─────────────────────────────────────────────────────────
     nodes: list[dict] = []
 
-    def _hop_color(hop: int) -> str:
-        if hop == 0:
-            return _COLORS["seed"]
-        elif hop == 1:
-            return _COLORS["hop1"]
-        elif hop == 2:
-            return _COLORS["hop2"]
-        else:
-            return _COLORS["hop3"]
-
-    def _hop_size(hop: int) -> int:
-        if hop == 0:
-            return 22
-        elif hop == 1:
-            return 18
-        elif hop == 2:
-            return 15
-        else:
-            return 12
-
-    # Cell nodes
     for node in subg.nodes:
         cell = graph.cells.get(node)
         hop = visited.get(node, 0)
@@ -373,7 +362,6 @@ def build_diff_propagation_graph(
             "hop": hop,
         })
 
-    # Indicator summary nodes
     for ind_id in affected_indicators:
         ind = graph.indicators.get(ind_id)
         if ind is None:
@@ -397,10 +385,9 @@ def build_diff_propagation_graph(
             "hop": -1,
         })
 
-    # ── Build ECharts edges ─────────────────────────────────────────────────
+    # ── Build edges ─────────────────────────────────────────────────────────
     edges: list[dict] = []
 
-    # Cell dependency edges
     for src, dst in subg.edges:
         hop_src = visited.get(src, 99)
         hop_dst = visited.get(dst, 99)
@@ -415,7 +402,6 @@ def build_diff_propagation_graph(
             "hop": edge_hop,
         })
 
-    # Indicator-to-cell edges (dashed)
     for cid in visited:
         cell = graph.cells.get(cid)
         if cell and cell.indicator_id:
@@ -437,7 +423,7 @@ def build_diff_propagation_graph(
     large = len(nodes) > 200
     option = _base_graph_option(nodes, edges, categories, large=large)
 
-    # ── Inject propagation animation JS ─────────────────────────────────────
+    # Pre-compute hop groupings
     nodes_by_hop: dict[int, list[str]] = {}
     edges_by_hop: dict[int, list[dict]] = {}
 
@@ -463,13 +449,14 @@ def build_diff_propagation_graph(
         "totalNodes": total_nodes,
     })
 
-    extra_js = _build_animation_js(anim_data_json)
+    extra_js = _build_animation_js(anim_data_json, speed)
 
     return _render_html(option, extra_js=extra_js)
 
 
-def _build_animation_js(anim_data_json: str) -> str:
-    """Build the propagation animation JavaScript."""
+def _build_animation_js(anim_data_json: str, speed: float) -> str:
+    """Build the propagation animation JavaScript with depth + speed controls."""
+    speed_safe = max(0.1, min(5.0, speed))
     return f"""
   var animData = {anim_data_json};
   var nodesByHop = animData.nodesByHop;
@@ -477,78 +464,85 @@ def _build_animation_js(anim_data_json: str) -> str:
   var maxHop = animData.maxHop;
   var totalNodes = animData.totalNodes;
 
+  // ── State ──────────────────────────────────────────────────────────
+  var currentDepth = maxHop;
+  var speedMultiplier = {speed_safe};
   var animTimers = [];
   var animRunning = false;
+
+  // All nodes + edges (always visible by default, filtered by depth)
+  var allNodes = [];
+  var allEdges = [];
 
   function clearTimers() {{
     animTimers.forEach(function(t) {{ clearTimeout(t); }});
     animTimers = [];
   }}
 
-  function addControls() {{
-    var existing = document.getElementById('prop-ctrl');
-    if (existing) existing.remove();
+  // ── Depth filter ───────────────────────────────────────────────────
+  function applyDepth(depth) {{
+    currentDepth = depth;
+    var showNodes = [];
+    var showEdges = [];
 
-    var panel = document.createElement('div');
-    panel.id = 'prop-ctrl';
-    panel.style.cssText = 'position:absolute;top:10px;right:10px;z-index:100;background:rgba(30,41,59,0.95);border-radius:10px;padding:10px 14px;box-shadow:0 2px 12px rgba(0,0,0,0.3);font-family:system-ui,sans-serif;font-size:13px;display:flex;gap:8px;align-items:center;flex-direction:column;color:#e2e8f0;';
+    // Cell nodes with hop <= depth
+    for (var hop = 0; hop <= depth; hop++) {{
+      (nodesByHop[hop] || []).forEach(function(id) {{ showNodes.push(id); }});
+      (edgesByHop[hop] || []).forEach(function(e) {{ showEdges.push(e); }});
+    }}
+    // Always show indicator summary nodes (hop=-1)
+    if (nodesByHop[-1]) {{
+      nodesByHop[-1].forEach(function(id) {{ showNodes.push(id); }});
+    }}
+    // Always show indicator-to-cell edges (hop=-1)
+    if (edgesByHop[-1]) {{
+      edgesByHop[-1].forEach(function(e) {{ showEdges.push(e); }});
+    }}
 
-    var btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;gap:8px;align-items:center;';
-    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-size:13px;">▶ 播放</button><button id="prop-fullscreen" style="background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px;">⛶ 全屏</button>';
-
-    var infoRow = document.createElement('div');
-    infoRow.style.cssText = 'text-align:center;color:#94a3b8;font-size:11px;';
-    infoRow.textContent = '共 ' + totalNodes + ' 个节点, 最大 ' + maxHop + ' 跳';
-
-    var statusRow = document.createElement('div');
-    statusRow.id = 'prop-status';
-    statusRow.style.cssText = 'text-align:center;color:#94a3b8;font-size:12px;';
-    statusRow.textContent = '稳定后开始...';
-
-    var progressBar = document.createElement('div');
-    progressBar.style.cssText = 'width:100%;height:4px;background:#1e293b;border-radius:2px;overflow:hidden;margin-top:4px;';
-    progressBar.innerHTML = '<div id="prop-progress-fill" style="width:0%;height:100%;background:#22c55e;transition:width 0.3s;"></div>';
-
-    panel.appendChild(btnRow);
-    panel.appendChild(infoRow);
-    panel.appendChild(statusRow);
-    panel.appendChild(progressBar);
-    document.getElementById('chart').parentElement.appendChild(panel);
-
-    document.getElementById('prop-replay').addEventListener('click', function() {{
-      clearTimers();
-      animRunning = false;
-      document.getElementById('prop-status').textContent = '准备中...';
-      document.getElementById('prop-progress-fill').style.width = '0%';
-      runAnimation();
+    myChart.setOption({{
+      series: [{{
+        data: showNodes.map(function(id) {{
+          var orig = myChart.getOption().series[0].data.find(function(n) {{ return n.id === id; }});
+          return orig || {{}};
+        }}),
+        links: showEdges.map(function(e) {{
+          return {{ source: e.source, target: e.target }};
+        }}),
+      }}],
     }});
 
-    document.getElementById('prop-fullscreen').addEventListener('click', function() {{
-      var el = document.documentElement;
-      if (!document.fullscreenElement) {{
-        el.requestFullscreen().catch(function(){{}});
-      }} else {{
-        document.exitFullscreen().catch(function(){{}});
-      }}
-    }});
+    updateStatus();
   }}
 
+  function updateStatus() {{
+    var statusEl = document.getElementById('prop-status');
+    var infoEl = document.getElementById('prop-info');
+    var visibleNodes = 0;
+    for (var h = 0; h <= currentDepth; h++) {{
+      visibleNodes += (nodesByHop[h] || []).length;
+    }}
+    var indCount = (nodesByHop[-1] || []).length;
+    var total = visibleNodes + indCount;
+    if (statusEl) statusEl.textContent = '深度: ' + currentDepth + ' | 节点: ' + total;
+  }}
+
+  // ── Animation ──────────────────────────────────────────────────────
   function runAnimation() {{
     clearTimers();
     animRunning = true;
 
-    if (maxHop === 0 && (nodesByHop[0] || []).length > 0) {{
-      document.getElementById('prop-status').textContent = '✅ 仅源头变化';
-      document.getElementById('prop-progress-fill').style.width = '100%';
+    if (currentDepth === 0 && (nodesByHop[0] || []).length > 0) {{
+      if (document.getElementById('prop-status'))
+        document.getElementById('prop-status').textContent = '✅ 仅源头变化';
       return;
     }}
 
     var batches = [];
-    for (var hop = 0; hop <= maxHop; hop++) {{
-      var hNodes = nodesByHop[hop] || [];
-      var hEdges = edgesByHop[hop] || [];
-      batches.push({{ hop: hop, nodes: hNodes, edges: hEdges }});
+    for (var hop = 0; hop <= currentDepth; hop++) {{
+      batches.push({{
+        hop: hop,
+        nodes: nodesByHop[hop] || [],
+      }});
     }}
 
     var batchIdx = 0;
@@ -556,35 +550,111 @@ def _build_animation_js(anim_data_json: str) -> str:
       if (!animRunning) return;
       if (batchIdx >= batches.length) {{
         animRunning = false;
-        var statusEl = document.getElementById('prop-status');
-        var fillEl = document.getElementById('prop-progress-fill');
-        if (statusEl) statusEl.textContent = '✅ 传播完成 (' + maxHop + ' 跳)';
-        if (fillEl) fillEl.style.width = '100%';
+        if (document.getElementById('prop-status'))
+          document.getElementById('prop-status').textContent = '✅ 传播完成 (' + currentDepth + ' 跳)';
         return;
       }}
 
       var batch = batches[batchIdx];
-      var pct = Math.round(batch.hop / (maxHop + 1) * 100);
+      var pct = Math.round(batch.hop / (currentDepth + 1) * 100);
       var fillEl = document.getElementById('prop-progress-fill');
       var statusEl = document.getElementById('prop-status');
       if (fillEl) fillEl.style.width = pct + '%';
-      if (statusEl) statusEl.textContent = '第 ' + batch.hop + '/' + maxHop + ' 跳';
+      if (statusEl) statusEl.textContent = '第 ' + batch.hop + '/' + currentDepth + ' 跳';
 
-      // Highlight nodes in this batch
       batch.nodes.forEach(function(nid) {{
         myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
       }});
 
+      var interval = Math.max(100, 400 / speedMultiplier);
       animTimers.push(setTimeout(function() {{
         batch.nodes.forEach(function(nid) {{
           myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
         }});
         batchIdx++;
-        animTimers.push(setTimeout(runNextBatch, 200));
-      }}, 400));
+        animTimers.push(setTimeout(runNextBatch, Math.max(50, 200 / speedMultiplier)));
+      }}, interval));
     }}
 
     runNextBatch();
+  }}
+
+  // ── Controls UI ────────────────────────────────────────────────────
+  function addControls() {{
+    var existing = document.getElementById('prop-ctrl');
+    if (existing) existing.remove();
+
+    var panel = document.createElement('div');
+    panel.id = 'prop-ctrl';
+    panel.style.cssText = 'position:absolute;top:10px;right:10px;z-index:100;background:rgba(30,41,59,0.95);border-radius:10px;padding:10px 14px;box-shadow:0 2px 12px rgba(0,0,0,0.3);font-family:system-ui,sans-serif;font-size:13px;display:flex;gap:8px;align-items:flex-start;flex-direction:column;color:#e2e8f0;min-width:180px;';
+
+    // Row 1: buttons
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:6px;align-items:center;width:100%;';
+    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-weight:500;font-size:12px;flex:1;">▶ 播放</button><button id="prop-fs" style="background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px;">⛶</button>';
+    panel.appendChild(btnRow);
+
+    // Row 2: depth slider
+    var depthRow = document.createElement('div');
+    depthRow.style.cssText = 'display:flex;gap:6px;align-items:center;width:100%;font-size:12px;';
+    depthRow.innerHTML = '<span style="white-space:nowrap;color:#94a3b8;">深度</span><input id="prop-depth" type="range" min="1" max="' + maxHop + '" value="' + maxHop + '" style="flex:1;accent-color:#22c55e;"><span id="prop-depth-val" style="color:#22c55e;font-weight:600;min-width:20px;text-align:center;">' + maxHop + '</span>';
+    panel.appendChild(depthRow);
+
+    // Row 3: speed slider
+    var speedRow = document.createElement('div');
+    speedRow.style.cssText = 'display:flex;gap:6px;align-items:center;width:100%;font-size:12px;';
+    speedRow.innerHTML = '<span style="white-space:nowrap;color:#94a3b8;">速度</span><input id="prop-speed" type="range" min="1" max="50" value="' + Math.round({speed_safe} * 10) + '" style="flex:1;accent-color:#f59e0b;"><span id="prop-speed-val" style="color:#f59e0b;font-weight:600;min-width:30px;text-align:center;">' + {speed_safe} + 'x</span>';
+    panel.appendChild(speedRow);
+
+    // Row 4: status + progress
+    var infoEl = document.createElement('div');
+    infoEl.id = 'prop-info';
+    infoEl.style.cssText = 'text-align:center;color:#94a3b8;font-size:11px;';
+    infoEl.textContent = '共 ' + totalNodes + ' 个节点';
+    panel.appendChild(infoEl);
+
+    var statusEl = document.createElement('div');
+    statusEl.id = 'prop-status';
+    statusEl.style.cssText = 'text-align:center;color:#94a3b8;font-size:12px;';
+    statusEl.textContent = '稳定后开始...';
+    panel.appendChild(statusEl);
+
+    var progressBar = document.createElement('div');
+    progressBar.style.cssText = 'width:100%;height:4px;background:#1e293b;border-radius:2px;overflow:hidden;';
+    progressBar.innerHTML = '<div id="prop-progress-fill" style="width:0%;height:100%;background:#22c55e;transition:width 0.3s;"></div>';
+    panel.appendChild(progressBar);
+
+    document.getElementById('chart').parentElement.appendChild(panel);
+
+    // ── Event bindings ─────────────────────────────────────────────
+    // Replay
+    document.getElementById('prop-replay').addEventListener('click', function() {{
+      clearTimers();
+      animRunning = false;
+      document.getElementById('prop-progress-fill').style.width = '0%';
+      runAnimation();
+    }});
+
+    // Fullscreen
+    document.getElementById('prop-fs').addEventListener('click', function() {{
+      var el = document.documentElement;
+      if (!document.fullscreenElement) {{ el.requestFullscreen().catch(function(){{}}); }}
+      else {{ document.exitFullscreen().catch(function(){{}}); }}
+    }});
+
+    // Depth slider
+    document.getElementById('prop-depth').addEventListener('input', function() {{
+      var depth = parseInt(this.value);
+      document.getElementById('prop-depth-val').textContent = depth;
+      currentDepth = depth;
+      applyDepth(depth);
+    }});
+
+    // Speed slider
+    document.getElementById('prop-speed').addEventListener('input', function() {{
+      speedMultiplier = parseInt(this.value) / 10;
+      document.getElementById('prop-speed-val').textContent = speedMultiplier.toFixed(1) + 'x';
+    }});
   }}
 
   addControls();
