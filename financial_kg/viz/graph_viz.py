@@ -16,8 +16,8 @@ _ECHARTS_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0f172a; }}
-#chart {{ width: 100%; height: 100%; }}
+html, body {{ margin: 0; padding: 0; width: 100%%; height: 100%%; overflow: hidden; background: #0f172a; }}
+#chart {{ width: 100%%; height: 100%%; }}
 </style>
 </head>
 <body>
@@ -291,7 +291,7 @@ def build_diff_propagation_graph(
             visited[cid] = 0
             queue.append(cid)
 
-    # BFS through predecessors
+    # BFS through predecessors — strict max_hops limit
     while queue:
         node = queue.popleft()
         hop = visited[node]
@@ -430,7 +430,6 @@ def build_diff_propagation_graph(
     option = _base_graph_option(nodes, edges, categories, large=large)
 
     # ── Inject propagation animation JS ─────────────────────────────────────
-    # Pre-compute hop groupings in Python
     nodes_by_hop: dict[int, list[str]] = {}
     edges_by_hop: dict[int, list[dict]] = {}
 
@@ -447,11 +446,13 @@ def build_diff_propagation_graph(
         edges_by_hop.setdefault(hop, []).append({"source": e["source"], "target": e["target"]})
 
     max_hop = max(nodes_by_hop.keys()) if nodes_by_hop else 0
+    total_nodes = len(nodes)
 
     anim_data_json = json.dumps({
         "nodesByHop": nodes_by_hop,
         "edgesByHop": edges_by_hop,
         "maxHop": max_hop,
+        "totalNodes": total_nodes,
     })
 
     extra_js = _build_animation_js(anim_data_json)
@@ -466,14 +467,10 @@ def _build_animation_js(anim_data_json: str) -> str:
   var nodesByHop = animData.nodesByHop;
   var edgesByHop = animData.edgesByHop;
   var maxHop = animData.maxHop;
+  var totalNodes = animData.totalNodes;
 
-  var ANIM = {{
-    hopInterval: 1000,
-    edgeStagger: 60,
-    nodePulseMs: 800,
-    green: '#22c55e',
-  }};
   var animTimers = [];
+  var animRunning = false;
 
   function clearTimers() {{
     animTimers.forEach(function(t) {{ clearTimeout(t); }});
@@ -490,7 +487,11 @@ def _build_animation_js(anim_data_json: str) -> str:
 
     var btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex;gap:8px;align-items:center;';
-    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-size:13px;">▶ 播放</button>';
+    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-size:13px;">▶ 播放</button><button id="prop-fullscreen" style="background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px;">⛶ 全屏</button>';
+
+    var infoRow = document.createElement('div');
+    infoRow.style.cssText = 'text-align:center;color:#94a3b8;font-size:11px;';
+    infoRow.textContent = '共 ' + totalNodes + ' 个节点, 最大 ' + maxHop + ' 跳';
 
     var statusRow = document.createElement('div');
     statusRow.id = 'prop-status';
@@ -502,83 +503,82 @@ def _build_animation_js(anim_data_json: str) -> str:
     progressBar.innerHTML = '<div id="prop-progress-fill" style="width:0%;height:100%;background:#22c55e;transition:width 0.3s;"></div>';
 
     panel.appendChild(btnRow);
+    panel.appendChild(infoRow);
     panel.appendChild(statusRow);
     panel.appendChild(progressBar);
     document.getElementById('chart').parentElement.appendChild(panel);
 
     document.getElementById('prop-replay').addEventListener('click', function() {{
       clearTimers();
+      animRunning = false;
       document.getElementById('prop-status').textContent = '准备中...';
       document.getElementById('prop-progress-fill').style.width = '0%';
       runAnimation();
+    }});
+
+    document.getElementById('prop-fullscreen').addEventListener('click', function() {{
+      var el = document.documentElement;
+      if (!document.fullscreenElement) {{
+        el.requestFullscreen().catch(function(){{}});
+      }} else {{
+        document.exitFullscreen().catch(function(){{}});
+      }}
     }});
   }}
 
   function runAnimation() {{
     clearTimers();
-    myChart.setOption({{ series: [{{ force: {{ layoutAnimation: false }} }}] }});
+    animRunning = true;
 
-    // Seed node pulse
-    var seedNodes = nodesByHop[0] || [];
-    seedNodes.forEach(function(id, idx) {{
-      setTimeout(function() {{
-        myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: id }});
-        setTimeout(function() {{
-          myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: id }});
-        }}, ANIM.nodePulseMs);
-      }}, idx * ANIM.edgeStagger);
-    }});
-
-    // Hop-by-hop reveal
-    for (var hop = 1; hop <= maxHop; hop++) {{
-      (function(currentHop) {{
-        var delay = (currentHop) * ANIM.hopInterval;
-        animTimers.push(setTimeout(function() {{
-          var hEdges = edgesByHop[currentHop] || [];
-          var hNodes = nodesByHop[currentHop] || [];
-
-          // Reveal edges with stagger
-          hEdges.forEach(function(edge, idx) {{
-            var edgeDelay = idx * ANIM.edgeStagger;
-            animTimers.push(setTimeout(function() {{
-              myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: edge.source }});
-              setTimeout(function() {{
-                myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: edge.source }});
-              }}, ANIM.nodePulseMs);
-            }}, edgeDelay));
-          }});
-
-          // Pulse nodes
-          hNodes.forEach(function(nid, idx) {{
-            var nodeDelay = idx * ANIM.edgeStagger;
-            animTimers.push(setTimeout(function() {{
-              myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
-              setTimeout(function() {{
-                myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
-              }}, ANIM.nodePulseMs);
-            }}, nodeDelay));
-          }});
-
-          // Update progress
-          var pct = Math.round(currentHop / (maxHop + 1) * 100);
-          var fillEl = document.getElementById('prop-progress-fill');
-          var statusEl = document.getElementById('prop-status');
-          if (fillEl) fillEl.style.width = pct + '%';
-          if (statusEl) statusEl.textContent = '第 ' + currentHop + '/' + maxHop + ' 跳';
-
-          if (currentHop === maxHop) {{
-            setTimeout(function() {{
-              if (statusEl) statusEl.textContent = '✅ 传播完成 (' + maxHop + ' 跳)';
-              if (fillEl) fillEl.style.width = '100%';
-              myChart.setOption({{ series: [{{ force: {{ layoutAnimation: true }} }}] }});
-            }}, ANIM.nodePulseMs);
-          }}
-        }}, delay));
-      }})(hop);
+    if (maxHop === 0 && (nodesByHop[0] || []).length > 0) {{
+      document.getElementById('prop-status').textContent = '✅ 仅源头变化';
+      document.getElementById('prop-progress-fill').style.width = '100%';
+      return;
     }}
+
+    var batches = [];
+    for (var hop = 0; hop <= maxHop; hop++) {{
+      var hNodes = nodesByHop[hop] || [];
+      var hEdges = edgesByHop[hop] || [];
+      batches.push({{ hop: hop, nodes: hNodes, edges: hEdges }});
+    }}
+
+    var batchIdx = 0;
+    function runNextBatch() {{
+      if (!animRunning) return;
+      if (batchIdx >= batches.length) {{
+        animRunning = false;
+        var statusEl = document.getElementById('prop-status');
+        var fillEl = document.getElementById('prop-progress-fill');
+        if (statusEl) statusEl.textContent = '✅ 传播完成 (' + maxHop + ' 跳)';
+        if (fillEl) fillEl.style.width = '100%';
+        return;
+      }}
+
+      var batch = batches[batchIdx];
+      var pct = Math.round(batch.hop / (maxHop + 1) * 100);
+      var fillEl = document.getElementById('prop-progress-fill');
+      var statusEl = document.getElementById('prop-status');
+      if (fillEl) fillEl.style.width = pct + '%';
+      if (statusEl) statusEl.textContent = '第 ' + batch.hop + '/' + maxHop + ' 跳';
+
+      // Highlight nodes in this batch
+      batch.nodes.forEach(function(nid) {{
+        myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
+      }});
+
+      animTimers.push(setTimeout(function() {{
+        batch.nodes.forEach(function(nid) {{
+          myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
+        }});
+        batchIdx++;
+        animTimers.push(setTimeout(runNextBatch, 200));
+      }}, 400));
+    }}
+
+    runNextBatch();
   }}
 
-  // Add controls and auto-start
   addControls();
   setTimeout(function() {{ runAnimation(); }}, 1500);
 """
