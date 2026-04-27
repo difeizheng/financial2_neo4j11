@@ -389,18 +389,26 @@ def build_diff_propagation_graph(
         })
 
     # ── Build edges ─────────────────────────────────────────────────────────
+    # Reverse direction: original graph is A→B (A depends on B),
+    # but propagation flows B→A (B's change affects A).
     edges: list[dict] = []
 
     for src, dst in subg.edges:
         hop_src = visited.get(src, 99)
         hop_dst = visited.get(dst, 99)
-        edge_hop = max(hop_src, hop_dst)
+        # Determine propagation direction: higher hop → lower hop
+        if hop_src > hop_dst:
+            edge_source, edge_target = src, dst
+            edge_hop = hop_src
+        else:
+            edge_source, edge_target = dst, src
+            edge_hop = hop_dst
         edges.append({
-            "source": src,
-            "target": dst,
+            "source": edge_source,
+            "target": edge_target,
             "lineStyle": {
-                "color": _hop_color(edge_hop) if edge_hop <= 2 else _COLORS["hop3"],
-                "width": 3 if edge_hop == 0 else 1.5,
+                "color": "#475569",
+                "width": 1.5,
             },
             "hop": edge_hop,
         })
@@ -515,7 +523,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     if (statusEl) statusEl.textContent = '深度: ' + currentDepth + ' | 节点: ' + total;
   }}
 
-  // ── Animation: highlight batch by batch ────────────────────────────
+  // ── Animation: nodes + edges turn green layer by layer ───────────
   function runAnimation() {{
     clearTimers();
     animRunning = true;
@@ -532,7 +540,8 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       var key = String(hop);
       batches.push({{
         hop: hop,
-        nodes: (nodesByHop[key] || []).map(function(n) {{ return n.id; }}),
+        nodeIds: (nodesByHop[key] || []).map(function(n) {{ return n.id; }}),
+        edgeHop: (edgesByHop[key] || []).map(function(e) {{ return {{ source: e.source, target: e.target }}; }}),
       }});
     }}
 
@@ -553,14 +562,35 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       if (fillEl) fillEl.style.width = pct + '%';
       if (statusEl) statusEl.textContent = '第 ' + (batch.hop) + '/' + currentDepth + ' 跳';
 
-      batch.nodes.forEach(function(nid) {{
-        myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
+      // Turn nodes green
+      var greenNodes = batch.nodeIds.map(function(nid) {{
+        var orig = nodeDataMap[nid];
+        return {{ id: nid, itemStyle: {{ color: '#22c55e' }}, name: orig ? orig.name : nid }};
+      }});
+      // Turn edges green
+      var greenEdges = batch.edgeHop.map(function(e) {{
+        return {{ source: e.source, target: e.target, lineStyle: {{ color: '#22c55e', width: 2 }} }};
+      }});
+
+      myChart.setOption({{
+        series: [{{ data: greenNodes, links: greenEdges }}],
       }});
 
       var hlTime = Math.max(100, 400 / speedMultiplier);
       animTimers.push(setTimeout(function() {{
-        batch.nodes.forEach(function(nid) {{
-          myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
+        // Restore original colors
+        var origNodes = batch.nodeIds.map(function(nid) {{
+          var nd = nodeDataMap[nid];
+          if (!nd) return {{}};
+          var n = {{ id: nid, name: nd.name }};
+          if (nd.itemStyle) n.itemStyle = {{ color: nd.itemStyle.color }};
+          return n;
+        }});
+        var origEdges = batch.edgeHop.map(function(e) {{
+          return {{ source: e.source, target: e.target, lineStyle: {{ color: '#475569', width: 1.5 }} }};
+        }});
+        myChart.setOption({{
+          series: [{{ data: origNodes, links: origEdges }}],
         }});
         batchIdx++;
         animTimers.push(setTimeout(runNextBatch, Math.max(50, 200 / speedMultiplier)));
