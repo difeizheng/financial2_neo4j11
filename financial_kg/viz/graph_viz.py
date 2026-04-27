@@ -260,7 +260,7 @@ def build_cell_subgraph(
 
         label = node.split("_", 1)[-1] if "_" in node else node
         val = cell.value if cell else "?"
-        formula = cell.formula_raw or "无" if cell else ""
+        formula = cell.formula_raw or "—" if cell else ""
         nodes.append({
             "id": node,
             "name": label,
@@ -288,28 +288,26 @@ def build_cell_subgraph(
 
 def build_diff_propagation_graph(
     graph: FinancialGraph,
-    changed_cell_ids: set[str],
+    root_cell_id: str,
     max_hops: int = 5,
     max_nodes: int = 300,
     speed: float = 1.0,
 ) -> str:
-    """Generate ECharts HTML with propagation animation.
+    """Generate ECharts HTML with propagation animation from a single root cell.
 
-    Generates FULL graph (up to max_hops=10). Frontend filters by depth slider.
-    Animation respects the current depth slider value.
+    BFS from root_cell_id through predecessors (downstream dependents).
+    Frontend depth slider filters visible nodes. Animation respects depth.
     """
     g = graph.cell_graph
 
-    # Always compute up to hop 10 for full flexibility
-    COMPUTE_MAX_HOPS = 10
+    if root_cell_id not in g:
+        raise ValueError(f"Root cell {root_cell_id!r} not in graph")
 
-    visited: dict[str, int] = {}
-    queue: deque[str] = deque()
+    COMPUTE_MAX_HOPS = max(10, max_hops)
 
-    for cid in changed_cell_ids:
-        if cid in g:
-            visited[cid] = 0
-            queue.append(cid)
+    # BFS from single root
+    visited: dict[str, int] = {root_cell_id: 0}
+    queue: deque[str] = deque([root_cell_id])
 
     while queue:
         node = queue.popleft()
@@ -324,9 +322,6 @@ def build_diff_propagation_graph(
                     queue.append(pred)
         if len(visited) >= max_nodes:
             break
-
-    if not visited:
-        raise ValueError("No affected cells found in graph")
 
     subg = g.subgraph(visited)
 
@@ -346,11 +341,11 @@ def build_diff_propagation_graph(
         shape = "diamond" if ind else "circle"
         label = node.split("_", 1)[-1] if "_" in node else node
         title = (
-            f"{'[CHANGED] ' if hop == 0 else ''}{node}<br/>"
+            f"{'[ROOT] ' if hop == 0 else ''}{node}<br/>"
             f"Value: {cell.value if cell else '?'}<br/>"
             f"Hop: {hop}<br/>"
             f"{'Indicator: ' + ind.name + '<br/>' if ind else ''}"
-            f"Formula: {cell.formula_raw or '无' if cell else ''}"
+            f"Formula: {cell.formula_raw or '—' if cell else ''}"
         )
         nodes.append({
             "id": node,
@@ -423,21 +418,21 @@ def build_diff_propagation_graph(
     large = len(nodes) > 200
     option = _base_graph_option(nodes, edges, categories, large=large)
 
-    # Pre-compute hop groupings
-    nodes_by_hop: dict[int, list[str]] = {}
+    # Pre-compute hop groupings — store full node/edge objects for O(1) filter
+    nodes_by_hop: dict[int, list[dict]] = {}
     edges_by_hop: dict[int, list[dict]] = {}
 
     for n in nodes:
         hop = n.get("hop", 0)
         if hop < 0:
             continue
-        nodes_by_hop.setdefault(hop, []).append(n["id"])
+        nodes_by_hop.setdefault(hop, []).append(n)
 
     for e in edges:
         hop = e.get("hop", 0)
         if hop < 0:
             continue
-        edges_by_hop.setdefault(hop, []).append({"source": e["source"], "target": e["target"]})
+        edges_by_hop.setdefault(hop, []).append(e)
 
     max_hop = max(nodes_by_hop.keys()) if nodes_by_hop else 0
     total_nodes = len(nodes)
@@ -465,13 +460,8 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
   var totalNodes = animData.totalNodes;
 
   // ── State ──────────────────────────────────────────────────────────
-  // State: full node/edge objects stored for depth filtering
-  var allNodeMap = Object.create(null);
-  var allEdgeList = [];
-  myChart.getOption().series[0].data.forEach(function(n) {{ allNodeMap[n.id] = n; }});
-  myChart.getOption().series[0].links.forEach(function(e) {{ allEdgeList.push(e); }});
-
-  var currentDepth = maxHop;
+  var currentDepth = Math.min(5, maxHop);
+  if (currentDepth < 1) currentDepth = 1;
   var speedMultiplier = {speed_safe};
   var animTimers = [];
   var animRunning = false;
@@ -481,36 +471,26 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     animTimers = [];
   }}
 
-  // ── Depth filter ───────────────────────────────────────────────────
+  // ── Depth filter: O(n) — collect from pre-grouped arrays ───────────
   function applyDepth(depth) {{
     currentDepth = depth;
     var showNodes = [];
     var showEdges = [];
 
-    // Cell nodes with hop <= depth
     for (var hop = 0; hop <= depth; hop++) {{
-      (nodesByHop[hop] || []).forEach(function(id) {{ if (allNodeMap[id]) showNodes.push(allNodeMap[id]); }});
+      (nodesByHop[hop] || []).forEach(function(n) {{ showNodes.push(n); }});
       (edgesByHop[hop] || []).forEach(function(e) {{ showEdges.push(e); }});
     }}
     // Always show indicator summary nodes (hop=-1)
     if (nodesByHop[-1]) {{
-      nodesByHop[-1].forEach(function(id) {{ if (allNodeMap[id]) showNodes.push(allNodeMap[id]); }});
+      nodesByHop[-1].forEach(function(n) {{ showNodes.push(n); }});
     }}
-    // Indicator-to-cell edges reference existing cell nodes already included
-    // or can be added if their source/target is visible
     if (edgesByHop[-1]) {{
-      edgesByHop[-1].forEach(function(e) {{
-        if (allNodeMap[e.source] || allNodeMap[e.target]) {{
-          showEdges.push(e);
-        }}
-      }});
+      edgesByHop[-1].forEach(function(e) {{ showEdges.push(e); }});
     }}
 
     myChart.setOption({{
-      series: [{{
-        data: showNodes,
-        links: showEdges,
-      }}],
+      series: [{{ data: showNodes, links: showEdges }}],
     }});
 
     updateStatus();
@@ -518,7 +498,6 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
 
   function updateStatus() {{
     var statusEl = document.getElementById('prop-status');
-    var infoEl = document.getElementById('prop-info');
     var visibleNodes = 0;
     for (var h = 0; h <= currentDepth; h++) {{
       visibleNodes += (nodesByHop[h] || []).length;
@@ -528,14 +507,15 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     if (statusEl) statusEl.textContent = '深度: ' + currentDepth + ' | 节点: ' + total;
   }}
 
-  // ── Animation ──────────────────────────────────────────────────────
+  // ── Animation: highlight batch by batch ────────────────────────────
   function runAnimation() {{
     clearTimers();
     animRunning = true;
 
     if (currentDepth === 0 && (nodesByHop[0] || []).length > 0) {{
       if (document.getElementById('prop-status'))
-        document.getElementById('prop-status').textContent = '✅ 仅源头变化';
+        document.getElementById('prop-status').textContent = '仅源头变化';
+      animRunning = false;
       return;
     }}
 
@@ -543,7 +523,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     for (var hop = 0; hop <= currentDepth; hop++) {{
       batches.push({{
         hop: hop,
-        nodes: nodesByHop[hop] || [],
+        nodes: (nodesByHop[hop] || []).map(function(n) {{ return n.id; }}),
       }});
     }}
 
@@ -553,29 +533,29 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       if (batchIdx >= batches.length) {{
         animRunning = false;
         if (document.getElementById('prop-status'))
-          document.getElementById('prop-status').textContent = '✅ 传播完成 (' + currentDepth + ' 跳)';
+          document.getElementById('prop-status').textContent = '传播完成 (' + currentDepth + ' 跳)';
         return;
       }}
 
       var batch = batches[batchIdx];
-      var pct = Math.round(batch.hop / (currentDepth + 1) * 100);
+      var pct = Math.round((batchIdx + 1) / batches.length * 100);
       var fillEl = document.getElementById('prop-progress-fill');
       var statusEl = document.getElementById('prop-status');
       if (fillEl) fillEl.style.width = pct + '%';
-      if (statusEl) statusEl.textContent = '第 ' + batch.hop + '/' + currentDepth + ' 跳';
+      if (statusEl) statusEl.textContent = '第 ' + (batch.hop) + '/' + currentDepth + ' 跳';
 
       batch.nodes.forEach(function(nid) {{
         myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
       }});
 
-      var interval = Math.max(100, 400 / speedMultiplier);
+      var hlTime = Math.max(100, 400 / speedMultiplier);
       animTimers.push(setTimeout(function() {{
         batch.nodes.forEach(function(nid) {{
           myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
         }});
         batchIdx++;
         animTimers.push(setTimeout(runNextBatch, Math.max(50, 200 / speedMultiplier)));
-      }}, interval));
+      }}, hlTime));
     }}
 
     runNextBatch();
@@ -599,7 +579,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     // Row 2: depth slider
     var depthRow = document.createElement('div');
     depthRow.style.cssText = 'display:flex;gap:6px;align-items:center;width:100%;font-size:12px;';
-    depthRow.innerHTML = '<span style="white-space:nowrap;color:#94a3b8;">深度</span><input id="prop-depth" type="range" min="1" max="' + maxHop + '" value="' + maxHop + '" style="flex:1;accent-color:#22c55e;"><span id="prop-depth-val" style="color:#22c55e;font-weight:600;min-width:20px;text-align:center;">' + maxHop + '</span>';
+    depthRow.innerHTML = '<span style="white-space:nowrap;color:#94a3b8;">深度</span><input id="prop-depth" type="range" min="1" max="' + Math.max(maxHop, 1) + '" value="' + currentDepth + '" style="flex:1;accent-color:#22c55e;"><span id="prop-depth-val" style="color:#22c55e;font-weight:600;min-width:20px;text-align:center;">' + currentDepth + '</span>';
     panel.appendChild(depthRow);
 
     // Row 3: speed slider
@@ -629,7 +609,6 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     document.getElementById('chart').parentElement.appendChild(panel);
 
     // ── Event bindings ─────────────────────────────────────────────
-    // Replay
     document.getElementById('prop-replay').addEventListener('click', function() {{
       clearTimers();
       animRunning = false;
@@ -637,22 +616,18 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
       runAnimation();
     }});
 
-    // Fullscreen
     document.getElementById('prop-fs').addEventListener('click', function() {{
       var el = document.documentElement;
       if (!document.fullscreenElement) {{ el.requestFullscreen().catch(function(){{}}); }}
       else {{ document.exitFullscreen().catch(function(){{}}); }}
     }});
 
-    // Depth slider
     document.getElementById('prop-depth').addEventListener('input', function() {{
       var depth = parseInt(this.value);
       document.getElementById('prop-depth-val').textContent = depth;
-      currentDepth = depth;
       applyDepth(depth);
     }});
 
-    // Speed slider
     document.getElementById('prop-speed').addEventListener('input', function() {{
       speedMultiplier = parseInt(this.value) / 10;
       document.getElementById('prop-speed-val').textContent = speedMultiplier.toFixed(1) + 'x';
@@ -660,5 +635,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
   }}
 
   addControls();
+  // Initial render at currentDepth
+  applyDepth(currentDepth);
   setTimeout(function() {{ runAnimation(); }}, 1500);
 """

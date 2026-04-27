@@ -103,16 +103,21 @@ if submitted and cell_id:
 
             # ── Propagation graph ────────────────────────────────────────────
             st.subheader("影响传播图谱")
+
+            # Root cell selection
+            root_options = {f"{c.cell_id}": c.cell_id for c in result.changed_cells}
+            root_label = st.selectbox("选择影响源头（根节点）", list(root_options.keys()))
+            root_cell_id = root_options[root_label]
+
             col_a, col_b = st.columns(2)
             max_hops = col_a.slider("传播深度", 1, 10, 5, key="recalc_hops")
             max_nodes_viz = col_b.slider("最大节点数", 50, 500, 200, 50, key="recalc_nodes")
 
             if st.button("生成传播图谱", key="recalc_viz_btn"):
-                changed_ids = {c.cell_id for c in result.changed_cells}
                 with st.spinner("渲染影响传播图谱..."):
                     html = build_diff_propagation_graph(
                         graph,
-                        changed_cell_ids=changed_ids,
+                        root_cell_id=root_cell_id,
                         max_hops=max_hops,
                         max_nodes=max_nodes_viz,
                     )
