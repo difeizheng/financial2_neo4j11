@@ -357,6 +357,9 @@ def build_diff_propagation_graph(
             "symbol": shape,
             "value": title,
             "hop": hop,
+            "raw_value": cell.value if cell else "?",
+            "formula": cell.formula_raw or "—" if cell else "—",
+            "indicator_name": ind.name if ind else "—",
         })
 
     for ind_id in affected_indicators:
@@ -380,6 +383,9 @@ def build_diff_propagation_graph(
                 f"Unit: {ind.unit or ''}"
             ),
             "hop": -1,
+            "raw_value": ind.summary_value,
+            "formula": "—",
+            "indicator_name": ind.name,
         })
 
     # ── Build edges ─────────────────────────────────────────────────────────
@@ -610,6 +616,58 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     panel.appendChild(progressBar);
 
     document.getElementById('chart').parentElement.appendChild(panel);
+
+    // ── Node detail panel ──────────────────────────────────────────
+    var nodeDataMap = {{}};
+    for (var hk in nodesByHop) {{
+      nodesByHop[hk].forEach(function(n) {{ nodeDataMap[n.id] = n; }});
+    }}
+    if (nodesByHop["-1"]) {{
+      nodesByHop["-1"].forEach(function(n) {{ nodeDataMap[n.id] = n; }});
+    }}
+
+    function showNodeDetail(data) {{
+      var existing = document.getElementById('node-detail');
+      if (existing) existing.remove();
+
+      var detail = document.createElement('div');
+      detail.id = 'node-detail';
+      detail.style.cssText = 'position:absolute;bottom:10px;left:10px;z-index:100;background:rgba(30,41,59,0.95);border-radius:10px;padding:14px 18px;box-shadow:0 2px 12px rgba(0,0,0,0.3);font-family:system-ui,sans-serif;font-size:13px;color:#e2e8f0;max-width:420px;max-height:300px;overflow-y:auto;';
+
+      var hopLabel = data.hop === 0 ? '源头' : data.hop === -1 ? 'Indicator' : '第' + data.hop + '跳';
+      var html = '<div style="font-weight:600;font-size:14px;margin-bottom:8px;color:#f8fafc;">' + hopLabel + '</div>';
+      html += '<table style="border-collapse:collapse;width:100%;">';
+
+      var rows = [
+        ['Cell ID', data.id],
+        ['名称', data.name],
+        ['值', data.raw_value !== undefined ? data.raw_value : '—'],
+        ['公式', data.formula || '—'],
+        ['Indicator', data.indicator_name || '—'],
+        ['Hop', data.hop === -1 ? 'N/A' : data.hop],
+      ];
+
+      rows.forEach(function(r) {{
+        html += '<tr><td style="color:#94a3b8;padding:2px 8px 2px 0;white-space:nowrap;">' + r[0] + '</td><td style="padding:2px 0;word-break:break-all;">' + r[1] + '</td></tr>';
+      }});
+
+      html += '</table>';
+      html += '<button id="node-detail-close" style="position:absolute;top:8px;right:8px;background:transparent;border:none;color:#94a3b8;font-size:16px;cursor:pointer;line-height:1;">×</button>';
+      detail.innerHTML = html;
+      document.getElementById('chart').parentElement.appendChild(detail);
+
+      document.getElementById('node-detail-close').addEventListener('click', function() {{
+        var el = document.getElementById('node-detail');
+        if (el) el.remove();
+      }});
+    }}
+
+    myChart.on('click', function(params) {{
+      if (params.componentType === 'series' && params.data && params.data.id) {{
+        var nd = nodeDataMap[params.data.id];
+        if (nd) showNodeDetail(nd);
+      }}
+    }});
 
     // ── Event bindings ─────────────────────────────────────────────
     document.getElementById('prop-replay').addEventListener('click', function() {{
