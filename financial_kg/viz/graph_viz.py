@@ -113,11 +113,11 @@ def _base_graph_option(
             "data": nodes,
             "links": edges,
             "force": {
-                "repulsion": 500,
-                "gravity": 0.15,
-                "edgeLength": [80, 150],
+                "repulsion": 200,
+                "gravity": 0.3,
+                "edgeLength": [50, 100],
                 "layoutAnimation": True,
-                "friction": 0.5,
+                "friction": 0.6,
             },
             "label": {
                 "show": True,
@@ -490,8 +490,10 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
     }}
 
     myChart.setOption({{
-      series: [{{ data: showNodes, links: showEdges }}],
-    }});
+      series: [{{ data: showNodes, links: showEdges, replaceMerge: ['data', 'links'] }}],
+    }}, true);
+
+    setTimeout(function() {{ myChart.resize(); }}, 100);
 
     updateStatus();
   }}
@@ -635,6 +637,7 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
   }}
 
   addControls();
+  myChart.resize();
   // Initial render at currentDepth
   applyDepth(currentDepth);
   setTimeout(function() {{ runAnimation(); }}, 1500);
