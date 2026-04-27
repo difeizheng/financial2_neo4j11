@@ -47,9 +47,7 @@ sheet_arg = None if sheet_filter == "全部" else sheet_filter
 if view_mode == "Indicator/Table 层":
     if st.button("生成图谱"):
         with st.spinner("渲染中..."):
-            html_path = build_indicator_graph(graph, sheet_filter=sheet_arg, max_nodes=max_nodes)
-        with open(html_path, encoding="utf-8") as f:
-            html = f.read()
+            html = build_indicator_graph(graph, sheet_filter=sheet_arg, max_nodes=max_nodes)
         components.html(html, height=720, scrolling=False)
 
     # Indicator table
@@ -77,9 +75,7 @@ else:
             st.error(f"Cell {cell_id!r} 不存在")
         else:
             with st.spinner("渲染中..."):
-                html_path = build_cell_subgraph(graph, cell_id, depth=depth)
-            with open(html_path, encoding="utf-8") as f:
-                html = f.read()
+                html = build_cell_subgraph(graph, cell_id, depth=depth)
             components.html(html, height=620, scrolling=False)
 
             cell = graph.cells[cell_id]

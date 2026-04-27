@@ -96,14 +96,12 @@ if cells:
     if st.button("生成传播图谱", key="compare_viz_btn"):
         changed_ids = {c["id"] for c in cells}
         with st.spinner("渲染影响传播图谱..."):
-            html_path = build_diff_propagation_graph(
+            html = build_diff_propagation_graph(
                 graph,
                 changed_cell_ids=changed_ids,
                 max_hops=max_hops,
                 max_nodes=max_nodes_viz,
             )
-        with open(html_path, encoding="utf-8") as f:
-            html = f.read()
         st.session_state["_compare_graph_html"] = html
         st.session_state["_compare_graph_stats"] = {
             "hops": max_hops,

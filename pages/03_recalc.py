@@ -110,14 +110,12 @@ if submitted and cell_id:
             if st.button("生成传播图谱", key="recalc_viz_btn"):
                 changed_ids = {c.cell_id for c in result.changed_cells}
                 with st.spinner("渲染影响传播图谱..."):
-                    html_path = build_diff_propagation_graph(
+                    html = build_diff_propagation_graph(
                         graph,
                         changed_cell_ids=changed_ids,
                         max_hops=max_hops,
                         max_nodes=max_nodes_viz,
                     )
-                with open(html_path, encoding="utf-8") as f:
-                    html = f.read()
                 st.session_state["_recalc_graph_html"] = html
 
             graph_html = st.session_state.get("_recalc_graph_html")

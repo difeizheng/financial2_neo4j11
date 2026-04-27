@@ -1,130 +1,212 @@
-"""pyvis-based interactive graph visualization."""
+"""ECharts-based interactive graph visualization."""
 from __future__ import annotations
-import os
-import tempfile
+
+import json
+import html as html_mod
 from collections import deque
 from typing import Optional
 
 from financial_kg.models.graph import FinancialGraph
 
-try:
-    from pyvis.network import Network
-    _PYVIS_AVAILABLE = True
-except ImportError:
-    _PYVIS_AVAILABLE = False
+
+# ── ECharts HTML template ───────────────────────────────────────────────────
+_ECHARTS_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0f172a; }}
+#chart {{ width: 100%; height: 100%; }}
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script src="../lib/echarts/echarts.min.js"></script>
+<script>
+(function() {{
+  var chartDom = document.getElementById('chart');
+  var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
+  var option = {option_json};
+  myChart.setOption(option);
+  window.addEventListener('resize', function() {{ myChart.resize(); }});
+  {extra_js}
+}})();
+</script>
+</body>
+</html>"""
 
 
-# Node/edge color palette
+# ── Color constants ─────────────────────────────────────────────────────────
 _COLORS = {
     "cell_formula": "#9E9E9E",
     "cell_value": "#BDBDBD",
     "indicator": "#42A5F5",
     "table": "#FFA726",
-    "edge_depends": "#CFD8DC",
-    "edge_calculates": "#42A5F5",
-    "edge_feeds": "#FFA726",
+    "seed": "#EF5350",
+    "hop1": "#FFA726",
+    "hop2": "#FFD54F",
+    "hop3": "#FFF9C4",
 }
 
 
+def _render_html(option: dict, extra_js: str = "") -> str:
+    """Generate a complete ECharts HTML string."""
+    option_json = json.dumps(option, ensure_ascii=False)
+    return _ECHARTS_TEMPLATE.format(option_json=option_json, extra_js=extra_js)
+
+
+def _base_graph_option(
+    nodes: list[dict],
+    edges: list[dict],
+    categories: list[dict] | None = None,
+    large: bool = False,
+) -> dict:
+    """Build a standard ECharts graph series option."""
+    return {
+        "tooltip": {
+            "show": True,
+            "trigger": "item",
+            "formatter": "{b}",
+            "textStyle": {"color": "#e2e8f0", "fontSize": 12},
+            "backgroundColor": "rgba(15,23,42,0.95)",
+            "borderColor": "#334155",
+            "borderWidth": 1,
+        },
+        "legend": {
+            "show": bool(categories),
+            "data": [c["name"] for c in categories] if categories else [],
+            "top": 10,
+            "right": 10,
+            "textStyle": {"color": "#e2e8f0", "fontSize": 12},
+        },
+        "series": [{
+            "type": "graph",
+            "layout": "force",
+            "roam": True,
+            "draggable": True,
+            "focusNodeAdjacency": True,
+            "large": large,
+            "largeThreshold": 200 if large else None,
+            "categories": categories or [],
+            "data": nodes,
+            "links": edges,
+            "force": {
+                "repulsion": 400,
+                "gravity": 0.08,
+                "edgeLength": [80, 160],
+                "layoutAnimation": True,
+            },
+            "label": {
+                "show": True,
+                "position": "right",
+                "formatter": "{b}",
+                "fontSize": 10,
+                "color": "#cbd5e1",
+            },
+            "lineStyle": {
+                "color": "#475569",
+                "width": 1.5,
+                "curveness": 0.2,
+            },
+            "edgeLabel": {
+                "show": False,
+            },
+            "emphasis": {
+                "focus": "adjacency",
+                "lineStyle": {"width": 3},
+                "label": {"fontSize": 12, "color": "#fff"},
+            },
+            "edgeSymbol": ["none", "arrow"],
+            "edgeSymbolSize": 8,
+        }],
+    }
+
+
+# ── Public API ──────────────────────────────────────────────────────────────
 def build_indicator_graph(
     graph: FinancialGraph,
     sheet_filter: Optional[str] = None,
     max_nodes: int = 300,
-    output_path: Optional[str] = None,
 ) -> str:
-    """Build a pyvis HTML showing Indicator + Table layers.
+    """Generate ECharts HTML for Indicator + Table layer graph."""
+    categories = [
+        {"name": "Indicator", "itemStyle": {"color": _COLORS["indicator"]}},
+        {"name": "Table", "itemStyle": {"color": _COLORS["table"]}},
+    ]
 
-    Returns the path to the generated HTML file.
-    """
-    if not _PYVIS_AVAILABLE:
-        raise ImportError("pyvis is not installed. Run: pip install pyvis")
-
-    net = Network(height="700px", width="100%", directed=True, notebook=False)
-    net.set_options("""
-    {
-      "physics": {"stabilization": {"iterations": 100}},
-      "edges": {"arrows": {"to": {"enabled": true, "scaleFactor": 0.5}}},
-      "interaction": {"hover": true, "navigationButtons": true}
-    }
-    """)
-
-    added_inds: set[str] = set()
-    added_tables: set[str] = set()
+    nodes: list[dict] = []
+    edges: list[dict] = []
     node_count = 0
+    added_tables: set[str] = set()
+    added_inds: set[str] = set()
 
-    # Add Table nodes
+    # Table nodes
     for tbl_id, tbl in graph.tables.items():
         if sheet_filter and tbl.sheet != sheet_filter:
             continue
         if node_count >= max_nodes:
             break
-        net.add_node(
-            tbl_id,
-            label=tbl.name[:20],
-            title=f"[Table] {tbl.name}\nSheet: {tbl.sheet}\nType: {tbl.table_type}",
-            color=_COLORS["table"],
-            shape="box",
-            size=25,
-        )
+        nodes.append({
+            "id": tbl_id,
+            "name": tbl.name[:20],
+            "category": 1,
+            "symbolSize": 25,
+            "value": (
+                f"[Table] {tbl.name}<br/>Sheet: {tbl.sheet}<br/>Type: {tbl.table_type}"
+            ),
+        })
         added_tables.add(tbl_id)
         node_count += 1
 
-    # Add Indicator nodes
+    # Indicator nodes
     for ind_id, ind in graph.indicators.items():
         if sheet_filter and ind.sheet != sheet_filter:
             continue
         if node_count >= max_nodes:
             break
         label = ind.name[:18] if ind.name else ind_id[-20:]
-        val_str = f"{ind.summary_value:.2f}" if isinstance(ind.summary_value, float) else str(ind.summary_value or "")
+        val_str = f"{ind.summary_value:.2f}" if isinstance(ind.summary_value, (int, float)) else str(ind.summary_value or "")
         unit_str = f" {ind.unit}" if ind.unit else ""
-        net.add_node(
-            ind_id,
-            label=label,
-            title=f"[Indicator] {ind.name}\nSheet: {ind.sheet}\nValue: {val_str}{unit_str}\nCategory: {ind.category or ''}",
-            color=_COLORS["indicator"],
-            shape="ellipse",
-            size=15,
-        )
+        nodes.append({
+            "id": ind_id,
+            "name": label,
+            "category": 0,
+            "symbolSize": 15,
+            "value": (
+                f"[Indicator] {ind.name}<br/>Sheet: {ind.sheet}<br/>"
+                f"Value: {val_str}{unit_str}<br/>Category: {ind.category or ''}"
+            ),
+        })
         added_inds.add(ind_id)
         node_count += 1
 
-    # CALCULATES_FROM edges (Indicator → Indicator)
+    # CALCULATES_FROM edges
     for ind_id, ind in graph.indicators.items():
         if ind_id not in added_inds:
             continue
         for dep_id in ind.depends_on_indicators:
             if dep_id in added_inds:
-                net.add_edge(ind_id, dep_id, color=_COLORS["edge_calculates"], width=1.5)
+                edges.append({"source": ind_id, "target": dep_id})
 
-    # FEEDS_INTO edges (Table → Table)
+    # FEEDS_INTO edges
     for tbl_id, tbl in graph.tables.items():
         if tbl_id not in added_tables:
             continue
         for target_id in tbl.feeds_into:
             if target_id in added_tables:
-                net.add_edge(tbl_id, target_id, color=_COLORS["edge_feeds"], width=2)
+                edges.append({"source": tbl_id, "target": target_id})
 
-    if output_path is None:
-        fd, output_path = tempfile.mkstemp(suffix=".html", prefix="kg_viz_")
-        os.close(fd)
-
-    net.save_graph(output_path)
-    return output_path
+    option = _base_graph_option(nodes, edges, categories)
+    return _render_html(option)
 
 
 def build_cell_subgraph(
     graph: FinancialGraph,
     root_cell_id: str,
     depth: int = 3,
-    output_path: Optional[str] = None,
 ) -> str:
-    """Build a pyvis HTML showing the dependency subgraph around a single cell."""
-    if not _PYVIS_AVAILABLE:
-        raise ImportError("pyvis is not installed.")
-
-    import networkx as nx
-
+    """Generate ECharts HTML for cell dependency subgraph around a single cell."""
     g = graph.cell_graph
     if root_cell_id not in g:
         raise ValueError(f"Cell {root_cell_id!r} not in graph")
@@ -142,25 +224,50 @@ def build_cell_subgraph(
         frontier = next_frontier
 
     subg = g.subgraph(neighbors)
-    net = Network(height="600px", width="100%", directed=True, notebook=False)
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
 
     for node in subg.nodes:
         cell = graph.cells.get(node)
         is_root = node == root_cell_id
-        color = "#EF5350" if is_root else (_COLORS["cell_formula"] if (cell and cell.formula_raw) else _COLORS["cell_value"])
+        if is_root:
+            color = _COLORS["seed"]
+            size = 22
+        elif cell and cell.formula_raw:
+            color = _COLORS["cell_formula"]
+            size = 12
+        else:
+            color = _COLORS["cell_value"]
+            size = 10
+
         label = node.split("_", 1)[-1] if "_" in node else node
-        title = f"{node}\nValue: {cell.value if cell else '?'}\nFormula: {cell.formula_raw or '' if cell else ''}"
-        net.add_node(node, label=label, title=title, color=color, size=20 if is_root else 12)
+        val = cell.value if cell else "?"
+        formula = cell.formula_raw or "无" if cell else ""
+        nodes.append({
+            "id": node,
+            "name": label,
+            "symbolSize": size,
+            "itemStyle": {"color": color},
+            "value": f"{node}<br/>Value: {val}<br/>Formula: {formula}",
+        })
 
     for src, dst in subg.edges:
-        net.add_edge(src, dst, color=_COLORS["edge_depends"])
+        edges.append({"source": src, "target": dst})
 
-    if output_path is None:
-        fd, output_path = tempfile.mkstemp(suffix=".html", prefix="kg_cell_")
-        os.close(fd)
+    option = _base_graph_option(nodes, edges)
 
-    net.save_graph(output_path)
-    return output_path
+    # Click handler: navigate to cell detail via URL query param
+    extra_js = """
+  myChart.on('click', function(params) {
+    if (params.componentType === 'series' && params.data && params.data.id) {
+      var url = new URL(window.location);
+      url.searchParams.set('cell', params.data.id);
+      window.location.href = url.toString();
+    }
+  });
+"""
+    return _render_html(option, extra_js=extra_js)
 
 
 def build_diff_propagation_graph(
@@ -168,25 +275,12 @@ def build_diff_propagation_graph(
     changed_cell_ids: set[str],
     max_hops: int = 5,
     max_nodes: int = 300,
-    output_path: Optional[str] = None,
 ) -> str:
-    """Build pyvis visualization of change propagation through the dependency graph.
+    """Generate ECharts HTML with hop-by-hop propagation animation.
 
-    Edge direction: A -> B means "A depends on B". When B changes, A is affected.
-    So we follow predecessors (cells that depend on the changed cell) to find propagation chain.
-
-    Node coloring:
-    - Seed changed cells: red (value decreased) / green (value increased)
-    - Propagated cells: yellow/orange gradient by hop distance
-    - Affected indicators: blue highlights
-
-    Node size: proportional to change magnitude for seeds, hop distance for propagated.
+    Edge direction: A -> B means "A depends on B".
+    When B changes, A is affected. Follow predecessors to find propagation.
     """
-    if not _PYVIS_AVAILABLE:
-        raise ImportError("pyvis is not installed. Run: pip install pyvis")
-
-    from pyvis.network import Network
-
     g = graph.cell_graph
     visited: dict[str, int] = {}  # cell_id -> hop distance (0 = seed)
     queue: deque[str] = deque()
@@ -197,7 +291,7 @@ def build_diff_propagation_graph(
             visited[cid] = 0
             queue.append(cid)
 
-    # BFS through predecessors (cells that depend on the changed cell)
+    # BFS through predecessors
     while queue:
         node = queue.popleft()
         hop = visited[node]
@@ -206,7 +300,7 @@ def build_diff_propagation_graph(
         for pred in g.predecessors(node):
             if pred not in visited:
                 cell = graph.cells.get(pred)
-                if cell and cell.formula_raw:  # Only propagate through formula cells
+                if cell and cell.formula_raw:
                     visited[pred] = hop + 1
                     queue.append(pred)
         if len(visited) >= max_nodes:
@@ -216,30 +310,6 @@ def build_diff_propagation_graph(
         raise ValueError("No affected cells found in graph")
 
     subg = g.subgraph(visited)
-    net = Network(height="700px", width="100%", directed=True, notebook=False)
-    net.set_options("""
-    {
-      "physics": {
-        "enabled": true,
-        "barnesHut": {
-          "gravitationalConstant": -4000,
-          "centralGravity": 0.3,
-          "springLength": 120,
-          "springConstant": 0.04,
-          "damping": 0.09,
-          "avoidOverlap": 0.3
-        },
-        "stabilization": {
-          "enabled": true,
-          "iterations": 300,
-          "fit": true
-        },
-        "minVelocity": 0.75
-      },
-      "edges": {"arrows": {"to": {"enabled": true, "scaleFactor": 0.5}}},
-      "interaction": {"hover": true, "navigationButtons": true}
-    }
-    """)
 
     # Collect affected indicator IDs
     affected_indicators: set[str] = set()
@@ -248,61 +318,54 @@ def build_diff_propagation_graph(
         if cell and cell.indicator_id:
             affected_indicators.add(cell.indicator_id)
 
+    # ── Build ECharts nodes ─────────────────────────────────────────────────
+    nodes: list[dict] = []
+
+    def _hop_color(hop: int) -> str:
+        if hop == 0:
+            return _COLORS["seed"]
+        elif hop == 1:
+            return _COLORS["hop1"]
+        elif hop == 2:
+            return _COLORS["hop2"]
+        else:
+            return _COLORS["hop3"]
+
+    def _hop_size(hop: int) -> int:
+        if hop == 0:
+            return 22
+        elif hop == 1:
+            return 18
+        elif hop == 2:
+            return 15
+        else:
+            return 12
+
+    # Cell nodes
     for node in subg.nodes:
         cell = graph.cells.get(node)
         hop = visited.get(node, 0)
         ind = graph.indicators.get(cell.indicator_id) if cell and cell.indicator_id else None
+        shape = "diamond" if ind else "circle"
+        label = node.split("_", 1)[-1] if "_" in node else node
+        title = (
+            f"{'[CHANGED] ' if hop == 0 else ''}{node}<br/>"
+            f"Value: {cell.value if cell else '?'}<br/>"
+            f"Hop: {hop}<br/>"
+            f"{'Indicator: ' + ind.name + '<br/>' if ind else ''}"
+            f"Formula: {cell.formula_raw or '无' if cell else ''}"
+        )
+        nodes.append({
+            "id": node,
+            "name": label,
+            "symbolSize": _hop_size(hop),
+            "itemStyle": {"color": _hop_color(hop)},
+            "symbol": shape,
+            "value": title,
+            "hop": hop,
+        })
 
-        # Color by hop
-        if hop == 0:
-            color = "#EF5350"  # red = seed/source of change
-            size = 22
-        elif hop == 1:
-            color = "#FFA726"  # orange = first hop
-            size = 18
-        elif hop == 2:
-            color = "#FFD54F"  # yellow
-            size = 15
-        else:
-            color = "#FFF9C4"  # light yellow
-            size = 12
-
-        if ind:
-            shape = "diamond"
-            title = (
-                f"[CHANGED] {node}\n"
-                f"Value: {cell.value if cell else '?'}\n"
-                f"Hop: {hop}\n"
-                f"Indicator: {ind.name}\n"
-                f"Formula: {cell.formula_raw or '无' if cell else ''}"
-            )
-        else:
-            shape = "ellipse"
-            title = (
-                f"{node}\n"
-                f"Value: {cell.value if cell else '?'}\n"
-                f"Hop: {hop}\n"
-                f"Formula: {cell.formula_raw or '无' if cell else ''}"
-            )
-
-        net.add_node(node, label=node.split("_", 1)[-1] if "_" in node else node,
-                     title=title, color=color, shape=shape, size=size, hop=hop)
-
-    for src, dst in subg.edges:
-        hop_src = visited.get(src, 99)
-        hop_dst = visited.get(dst, 99)
-        edge_hop = max(hop_src, hop_dst)
-        if edge_hop == 0:
-            edge_color = "#EF5350"
-            edge_width = 3
-            edge_hidden = False
-        else:
-            edge_color = "#CFD8DC"
-            edge_width = 1.5
-            edge_hidden = True  # Initially hidden, revealed by animation
-        net.add_edge(src, dst, color=edge_color, width=edge_width, hop=edge_hop, hidden=edge_hidden)
-
-    # Add indicator summary nodes
+    # Indicator summary nodes
     for ind_id in affected_indicators:
         ind = graph.indicators.get(ind_id)
         if ind is None:
@@ -311,443 +374,211 @@ def build_diff_propagation_graph(
             1 for cid in visited
             if graph.cells.get(cid) and graph.cells[cid].indicator_id == ind_id
         )
-        net.add_node(
-            f"IND_{ind_id}",
-            label=ind.name[:20],
-            title=f"[Indicator] {ind.name}\nCategory: {ind.category or ''}\n"
-                  f"Affected cells: {aff_count}\n"
-                  f"Value: {ind.summary_value}\n"
-                  f"Unit: {ind.unit or ''}",
-            color="#42A5F5",
-            shape="box",
-            size=max(15, min(30, aff_count * 5)),
-        )
-        for cid in visited:
-            cell = graph.cells.get(cid)
-            if cell and cell.indicator_id == ind_id:
-                net.add_edge(f"IND_{ind_id}", cid, color="#42A5F5", width=1.5, dashes=True, hop=-1)
+        nodes.append({
+            "id": f"IND_{ind_id}",
+            "name": ind.name[:20],
+            "category": 4,
+            "symbolSize": max(15, min(30, aff_count * 5)),
+            "symbol": "rect",
+            "itemStyle": {"color": _COLORS["indicator"]},
+            "value": (
+                f"[Indicator] {ind.name}<br/>Category: {ind.category or ''}<br/>"
+                f"Affected cells: {aff_count}<br/>Value: {ind.summary_value}<br/>"
+                f"Unit: {ind.unit or ''}"
+            ),
+            "hop": -1,
+        })
 
-    if output_path is None:
-        fd, output_path = tempfile.mkstemp(suffix=".html", prefix="kg_diff_")
-        os.close(fd)
+    # ── Build ECharts edges ─────────────────────────────────────────────────
+    edges: list[dict] = []
 
-    net.save_graph(output_path)
+    # Cell dependency edges
+    for src, dst in subg.edges:
+        hop_src = visited.get(src, 99)
+        hop_dst = visited.get(dst, 99)
+        edge_hop = max(hop_src, hop_dst)
+        edges.append({
+            "source": src,
+            "target": dst,
+            "lineStyle": {
+                "color": _hop_color(edge_hop) if edge_hop <= 2 else _COLORS["hop3"],
+                "width": 3 if edge_hop == 0 else 1.5,
+            },
+            "hop": edge_hop,
+        })
 
-    # Post-process: inject propagation animation
-    with open(output_path, encoding="utf-8") as f:
-        html_content = f.read()
-    html_content = _inject_propagation_animation(html_content)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+    # Indicator-to-cell edges (dashed)
+    for cid in visited:
+        cell = graph.cells.get(cid)
+        if cell and cell.indicator_id:
+            edges.append({
+                "source": f"IND_{cell.indicator_id}",
+                "target": cid,
+                "lineStyle": {"type": "dashed", "color": _COLORS["indicator"], "width": 1},
+                "hop": -1,
+            })
 
-    return output_path
+    categories = [
+        {"name": "变化源头 (Hop 0)", "itemStyle": {"color": _COLORS["seed"]}},
+        {"name": "第1跳", "itemStyle": {"color": _COLORS["hop1"]}},
+        {"name": "第2跳", "itemStyle": {"color": _COLORS["hop2"]}},
+        {"name": "第3跳+", "itemStyle": {"color": _COLORS["hop3"]}},
+        {"name": "Indicator", "itemStyle": {"color": _COLORS["indicator"]}},
+    ]
+
+    large = len(nodes) > 200
+    option = _base_graph_option(nodes, edges, categories, large=large)
+
+    # ── Inject propagation animation JS ─────────────────────────────────────
+    # Pre-compute hop groupings in Python
+    nodes_by_hop: dict[int, list[str]] = {}
+    edges_by_hop: dict[int, list[dict]] = {}
+
+    for n in nodes:
+        hop = n.get("hop", 0)
+        if hop < 0:
+            continue
+        nodes_by_hop.setdefault(hop, []).append(n["id"])
+
+    for e in edges:
+        hop = e.get("hop", 0)
+        if hop < 0:
+            continue
+        edges_by_hop.setdefault(hop, []).append({"source": e["source"], "target": e["target"]})
+
+    max_hop = max(nodes_by_hop.keys()) if nodes_by_hop else 0
+
+    anim_data_json = json.dumps({
+        "nodesByHop": nodes_by_hop,
+        "edgesByHop": edges_by_hop,
+        "maxHop": max_hop,
+    })
+
+    extra_js = _build_animation_js(anim_data_json)
+
+    return _render_html(option, extra_js=extra_js)
 
 
-def _inject_propagation_animation(html: str) -> str:
-    """Post-process pyvis HTML to inject propagation animation script."""
-    animation_js = r"""
-<script>
-(function() {
-  'use strict';
+def _build_animation_js(anim_data_json: str) -> str:
+    """Build the propagation animation JavaScript."""
+    return f"""
+  var animData = {anim_data_json};
+  var nodesByHop = animData.nodesByHop;
+  var edgesByHop = animData.edgesByHop;
+  var maxHop = animData.maxHop;
 
-  var ANIM = {
-    hopInterval: 1000,     // ms between hops
-    edgeStagger: 60,       // ms between individual edge reveals within a hop
-    nodePulseMs: 800,      // duration of node size pulse
+  var ANIM = {{
+    hopInterval: 1000,
+    edgeStagger: 60,
+    nodePulseMs: 800,
     green: '#22c55e',
-    greenLight: '#4ade80',
-    seedColor: '#EF5350',
-  };
-
+  }};
   var animTimers = [];
 
-  function clearTimers() {
-    animTimers.forEach(function(t) { clearTimeout(t); });
+  function clearTimers() {{
+    animTimers.forEach(function(t) {{ clearTimeout(t); }});
     animTimers = [];
-  }
+  }}
 
-  function addControls() {
+  function addControls() {{
     var existing = document.getElementById('prop-ctrl');
     if (existing) existing.remove();
 
     var panel = document.createElement('div');
     panel.id = 'prop-ctrl';
-    panel.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;background:rgba(255,255,255,0.95);border-radius:10px;padding:10px 14px;box-shadow:0 2px 12px rgba(0,0,0,0.18);font-family:system-ui,sans-serif;font-size:13px;display:flex;gap:8px;align-items:center;flex-direction:column;';
+    panel.style.cssText = 'position:absolute;top:10px;right:10px;z-index:100;background:rgba(30,41,59,0.95);border-radius:10px;padding:10px 14px;box-shadow:0 2px 12px rgba(0,0,0,0.3);font-family:system-ui,sans-serif;font-size:13px;display:flex;gap:8px;align-items:center;flex-direction:column;color:#e2e8f0;';
 
     var btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex;gap:8px;align-items:center;';
-    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;">▶ 播放</button><button id="prop-fs" style="background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;">⛶ 全屏</button>';
+    btnRow.innerHTML = '<button id="prop-replay" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-size:13px;">▶ 播放</button>';
 
     var statusRow = document.createElement('div');
-    statusRow.innerHTML = '<span id="prop-status" style="color:#64748b;font-size:12px;"></span>';
-    statusRow.style.cssText = 'text-align:center;';
+    statusRow.id = 'prop-status';
+    statusRow.style.cssText = 'text-align:center;color:#94a3b8;font-size:12px;';
+    statusRow.textContent = '稳定后开始...';
 
     var progressBar = document.createElement('div');
-    progressBar.id = 'prop-progress-bar';
-    progressBar.style.cssText = 'width:100%;height:4px;background:#e2e8f0;border-radius:2px;overflow:hidden;margin-top:4px;';
+    progressBar.style.cssText = 'width:100%;height:4px;background:#1e293b;border-radius:2px;overflow:hidden;margin-top:4px;';
     progressBar.innerHTML = '<div id="prop-progress-fill" style="width:0%;height:100%;background:#22c55e;transition:width 0.3s;"></div>';
 
     panel.appendChild(btnRow);
     panel.appendChild(statusRow);
     panel.appendChild(progressBar);
-    document.body.appendChild(panel);
+    document.getElementById('chart').parentElement.appendChild(panel);
 
-    document.getElementById('prop-replay').addEventListener('click', function() {
+    document.getElementById('prop-replay').addEventListener('click', function() {{
       clearTimers();
       document.getElementById('prop-status').textContent = '准备中...';
       document.getElementById('prop-progress-fill').style.width = '0%';
-      // Reset edges to initial hidden state
-      network.setOptions({physics: {enabled: false}});
-      var resetEdges = [];
-      var allE = edges.get({returnType: 'Object'});
-      for (var rid in allE) {
-        var re = allE[rid];
-        if (re.hop < 0) continue;
-        resetEdges.push({id: rid, hidden: re.hop > 0});
-      }
-      edges.update(resetEdges);
       runAnimation();
-    });
+    }});
+  }}
 
-    document.getElementById('prop-fs').addEventListener('click', toggleFullscreen);
-  }
-
-  var fsOverlay = null;
-  var fsNetwork = null;
-  var origNodes = null;
-  var origEdges = null;
-  var origNetwork = null;
-
-  function toggleFullscreen() {
-    if (fsOverlay) {
-      // Exit fullscreen mode
-      fsOverlay.remove();
-      fsOverlay = null;
-      fsNetwork = null;
-      // Restore original globals
-      nodes = origNodes;
-      edges = origEdges;
-      network = origNetwork;
-      var orig = document.getElementById('mynetwork');
-      if (orig) orig.style.display = 'block';
-      document.getElementById('prop-fs').textContent = '⛶ 全屏';
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(function(){});
-      }
-      return;
-    }
-    // Enter browser fullscreen first
-    var el = document.documentElement;
-    var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
-    if (rfs) {
-      rfs.call(el);
-    }
-
-    // If in iframe, try to make parent elements expand
-    if (window.frameElement) {
-      window.frameElement.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;border:none;';
-    }
-    // Also expand parent containers
-    var body = document.body;
-    body.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;overflow:hidden;margin:0;padding:0;z-index:99999;';
-    // Find and expand any parent wrapper that might constrain size
-    var p = body.parentElement;
-    while (p && p !== document.documentElement) {
-      p.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;overflow:hidden;margin:0;padding:0;';
-      p = p.parentElement;
-    }
-
-    // Hide original network
-    var orig = document.getElementById('mynetwork');
-    if (orig) orig.style.display = 'none';
-
-    // Save originals
-    origNodes = nodes;
-    origEdges = edges;
-    origNetwork = network;
-
-    // Build fullscreen overlay AFTER fullscreen change
-    function buildOverlay() {
-      fsOverlay = document.createElement('div');
-      fsOverlay.id = 'fs-overlay';
-      fsOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:10000;background:#1a1a2e;overflow:hidden;';
-
-      // Control bar
-      var ctrlBar = document.createElement('div');
-      ctrlBar.style.cssText = 'position:absolute;top:0;left:0;right:0;z-index:10001;display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:rgba(0,0,0,0.5);';
-      var exitBtn = document.createElement('button');
-      exitBtn.textContent = '✕ 退出全屏 (ESC)';
-      exitBtn.style.cssText = 'background:rgba(255,255,255,0.15);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:8px 16px;cursor:pointer;font-size:14px;';
-      exitBtn.addEventListener('click', toggleFullscreen);
-      var replayBtn = document.createElement('button');
-      replayBtn.textContent = '▶ 重播动画';
-      replayBtn.style.cssText = 'background:#22c55e;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:14px;font-weight:500;';
-      replayBtn.addEventListener('click', function() { clearTimers(); runAnimation(); });
-      var hint = document.createElement('span');
-      hint.style.cssText = 'color:rgba(255,255,255,0.6);font-size:12px;';
-      hint.textContent = '鼠标滚轮缩放 · 拖拽平移';
-      ctrlBar.appendChild(exitBtn);
-      ctrlBar.appendChild(replayBtn);
-      ctrlBar.appendChild(hint);
-      fsOverlay.appendChild(ctrlBar);
-
-      // Network container — explicit pixel size
-      var fsContainer = document.createElement('div');
-      fsContainer.id = 'fs-network-container';
-      var barH = 48;
-      fsContainer.style.cssText = 'position:absolute;top:' + barH + 'px;left:0;right:0;bottom:0;width:100%;';
-      fsOverlay.appendChild(fsContainer);
-      document.body.appendChild(fsOverlay);
-
-      // Clone nodes with proper color normalization
-      var nodeArr = nodes.get();
-      var edgeArr = edges.get();
-
-      // Ensure node colors are hex strings, not objects
-      var fsNodeArr = nodeArr.map(function(n) {
-        var copy = {id: n.id, label: n.label, title: n.title, shape: n.shape, size: n.size || 12, hop: n.hop || 0};
-        var c = n.color;
-        if (c && typeof c === 'object') {
-          copy.color = c.background || '#999';
-        } else if (typeof c === 'string') {
-          copy.color = c;
-        } else {
-          copy.color = '#999';
-        }
-        // Shadow
-        if (n.shadow) {
-          copy.shadow = {enabled: true, color: n.shadow.color || '#fff', size: n.shadow.size || 10};
-        }
-        return copy;
-      });
-
-      // Ensure edge colors are plain hex strings
-      var fsEdgeArr = edgeArr.map(function(e) {
-        var copy = {id: e.id, from: e.from, to: e.to, hop: e.hop || 0, width: e.width || 1.5, hidden: e.hidden === true, dashes: e.dashes || false, title: e.title || '', hop: e.hop};
-        var c = e.color;
-        if (c && typeof c === 'object') {
-          copy.color = c.color || '#CFD8DC';
-          copy.highlight = c.highlight || copy.color;
-          copy.hover = c.hover || copy.color;
-        } else if (typeof c === 'string') {
-          copy.color = c;
-          copy.highlight = c;
-          copy.hover = c;
-        } else {
-          copy.color = '#CFD8DC';
-          copy.highlight = '#CFD8DC';
-          copy.hover = '#CFD8DC';
-        }
-        // Arrows
-        if (e.arrows) {
-          copy.arrows = e.arrows;
-        } else {
-          copy.arrows = {to: {enabled: true, scaleFactor: 0.5}};
-        }
-        return copy;
-      });
-
-      var fsData = {
-        nodes: new vis.DataSet(fsNodeArr),
-        edges: new vis.DataSet(fsEdgeArr)
-      };
-
-      var fsOptions = {
-        physics: {enabled: false},
-        edges: {arrows: {to: {enabled: true, scaleFactor: 0.5}}},
-        interaction: {hover: true, navigationButtons: true}
-      };
-
-      fsNetwork = new vis.Network(fsContainer, fsData, fsOptions);
-
-      // Reassign globals for animation
-      nodes = fsData.nodes;
-      edges = fsData.edges;
-      network = fsNetwork;
-
-      document.getElementById('prop-fs').textContent = '⛶ 退出全屏';
-
-      setTimeout(function() { fsNetwork.fit(); }, 200);
-    }
-
-    // Small delay for fullscreen to activate
-    setTimeout(buildOverlay, 300);
-
-    // ESC to exit
-    document.addEventListener('keydown', function escHandler(e) {
-      if (e.key === 'Escape' && fsOverlay) {
-        document.removeEventListener('keydown', escHandler);
-        toggleFullscreen();
-      }
-    });
-  }
-
-  function runAnimation() {
-    _runAnimation(network, nodes, edges);
-  }
-
-  function _runAnimation(net, nodes, edges) {
-    if (!net || !edges || !nodes) return;
+  function runAnimation() {{
     clearTimers();
+    myChart.setOption({{ series: [{{ force: {{ layoutAnimation: false }} }}] }});
 
-    // Disable physics during animation to prevent lag
-    net.setOptions({physics: {enabled: false}});
-
-    var allEdgesObj = edges.get({returnType: 'Object'});
-    var allNodesObj = nodes.get({returnType: 'Object'});
-
-    // Group edges by hop
-    var edgesByHop = {};
-    var nodesByHop = {};
-    var maxHop = 0;
-
-    for (var eid in allEdgesObj) {
-      var e = allEdgesObj[eid];
-      var h = (e.hop !== undefined) ? Math.floor(e.hop) : 0;
-      if (h < 0) continue;
-      if (!edgesByHop[h]) edgesByHop[h] = [];
-      edgesByHop[h].push(eid);
-      if (h > maxHop) maxHop = h;
-    }
-
-    for (var nid in allNodesObj) {
-      var n = allNodesObj[nid];
-      var h = (n.hop !== undefined) ? Math.floor(n.hop) : 0;
-      if (!nodesByHop[h]) nodesByHop[h] = [];
-      nodesByHop[h].push(nid);
-    }
-
-    var statusEl = document.getElementById('prop-status');
-    var fillEl = document.getElementById('prop-progress-fill');
-
-    // Edges are already hidden (hop>0) or visible (hop=0) from pyvis generation.
-    // Just ensure seed edges are visible.
-    var showSeedEdges = [];
-    for (var eid in allEdgesObj) {
-      var e = allEdgesObj[eid];
-      if (e.hop === 0 && e.hidden) {
-        showSeedEdges.push({id: eid, hidden: false, color: ANIM.seedColor, width: 3});
-      }
-    }
-    if (showSeedEdges.length > 0) edges.update(showSeedEdges);
-
-    // Step 2: Seed node pulse
+    // Seed node pulse
     var seedNodes = nodesByHop[0] || [];
-    seedNodes.forEach(function(id) {
-      var sn = allNodesObj[id];
-      nodes.update([{id: id, size: (sn.size || 15) + 6, shadow: {enabled: true, color: ANIM.seedColor, size: 30}}]);
-    });
+    seedNodes.forEach(function(id, idx) {{
+      setTimeout(function() {{
+        myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: id }});
+        setTimeout(function() {{
+          myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: id }});
+        }}, ANIM.nodePulseMs);
+      }}, idx * ANIM.edgeStagger);
+    }});
 
-    animTimers.push(setTimeout(function() {
-      // Shrink seeds
-      seedNodes.forEach(function(id) {
-        var sn = allNodesObj[id];
-        nodes.update([{id: id, size: sn.size || 15, shadow: {enabled: false}}]);
-      });
+    // Hop-by-hop reveal
+    for (var hop = 1; hop <= maxHop; hop++) {{
+      (function(currentHop) {{
+        var delay = (currentHop) * ANIM.hopInterval;
+        animTimers.push(setTimeout(function() {{
+          var hEdges = edgesByHop[currentHop] || [];
+          var hNodes = nodesByHop[currentHop] || [];
 
-      // Step 3: Hop-by-hop reveal
-      var totalHops = maxHop;
-      var completedHops = 0;
+          // Reveal edges with stagger
+          hEdges.forEach(function(edge, idx) {{
+            var edgeDelay = idx * ANIM.edgeStagger;
+            animTimers.push(setTimeout(function() {{
+              myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: edge.source }});
+              setTimeout(function() {{
+                myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: edge.source }});
+              }}, ANIM.nodePulseMs);
+            }}, edgeDelay));
+          }});
 
-      for (var hop = 0; hop <= maxHop; hop++) {
-        (function(currentHop) {
-          var delay = (currentHop + 1) * ANIM.hopInterval;
-          animTimers.push(setTimeout(function() {
-            var hEdges = edgesByHop[currentHop] || [];
-            var hNodes = nodesByHop[currentHop] || [];
+          // Pulse nodes
+          hNodes.forEach(function(nid, idx) {{
+            var nodeDelay = idx * ANIM.edgeStagger;
+            animTimers.push(setTimeout(function() {{
+              myChart.dispatchAction({{ type: 'highlight', seriesIndex: 0, name: nid }});
+              setTimeout(function() {{
+                myChart.dispatchAction({{ type: 'downplay', seriesIndex: 0, name: nid }});
+              }}, ANIM.nodePulseMs);
+            }}, nodeDelay));
+          }});
 
-            // Reveal edges one by one with stagger
-            hEdges.forEach(function(eid, idx) {
-              var edgeDelay = idx * ANIM.edgeStagger;
-              animTimers.push(setTimeout(function() {
-                var orig = allEdgesObj[eid];
-                edges.update([{
-                  id: eid,
-                  hidden: false,
-                  color: {color: ANIM.green, highlight: ANIM.greenLight, hover: ANIM.greenLight},
-                  width: 4,
-                  shadow: {enabled: true, color: ANIM.green, size: 10}
-                }]);
+          // Update progress
+          var pct = Math.round(currentHop / (maxHop + 1) * 100);
+          var fillEl = document.getElementById('prop-progress-fill');
+          var statusEl = document.getElementById('prop-status');
+          if (fillEl) fillEl.style.width = pct + '%';
+          if (statusEl) statusEl.textContent = '第 ' + currentHop + '/' + maxHop + ' 跳';
 
-                // Restore edge style after pulse
-                animTimers.push(setTimeout(function() {
-                  edges.update([{
-                    id: eid,
-                    color: orig.color,
-                    width: orig.width || 2,
-                    shadow: {enabled: false}
-                  }]);
-                }, ANIM.nodePulseMs));
-              }, edgeDelay));
-            });
+          if (currentHop === maxHop) {{
+            setTimeout(function() {{
+              if (statusEl) statusEl.textContent = '✅ 传播完成 (' + maxHop + ' 跳)';
+              if (fillEl) fillEl.style.width = '100%';
+              myChart.setOption({{ series: [{{ force: {{ layoutAnimation: true }} }}] }});
+            }}, ANIM.nodePulseMs);
+          }}
+        }}, delay));
+      }})(hop);
+    }}
+  }}
 
-            // Pulse nodes when first reached
-            hNodes.forEach(function(nid, idx) {
-              var nodeDelay = idx * ANIM.edgeStagger;
-              animTimers.push(setTimeout(function() {
-                var origNode = allNodesObj[nid];
-                nodes.update([{
-                  id: nid,
-                  size: (origNode.size || 12) + 4,
-                  color: ANIM.green,
-                  shadow: {enabled: true, color: ANIM.green, size: 18}
-                }]);
-
-                // Restore
-                animTimers.push(setTimeout(function() {
-                  nodes.update([{
-                    id: nid,
-                    size: origNode.size || 12,
-                    color: origNode.color,
-                    shadow: {enabled: false}
-                  }]);
-                }, ANIM.nodePulseMs));
-              }, nodeDelay));
-            });
-
-            // Update progress
-            completedHops++;
-            var pct = Math.round(completedHops / (totalHops + 1) * 100);
-            if (fillEl) fillEl.style.width = pct + '%';
-            if (statusEl) statusEl.textContent = '第 ' + currentHop + '/' + maxHop + ' 跳';
-
-            // Done
-            if (currentHop === maxHop) {
-              animTimers.push(setTimeout(function() {
-                if (statusEl) statusEl.textContent = '✅ 传播完成 (' + maxHop + ' 跳)';
-                if (fillEl) fillEl.style.width = '100%';
-                net.setOptions({physics: {enabled: true}});
-              }, ANIM.nodePulseMs + hEdges.length * ANIM.edgeStagger));
-            }
-
-          }, delay));
-        })(hop);
-      }
-    }, 800));
-  }
-
-  // Wait for network
-  if (typeof network !== 'undefined' && network) {
-    addControls();
-    var statusEl = document.getElementById('prop-status');
-    if (statusEl) statusEl.textContent = '稳定后开始...';
-    network.once('stabilizationIterationsDone', function() {
-      setTimeout(function() { runAnimation(); }, 300);
-    });
-  } else {
-    var checkInterval = setInterval(function() {
-      if (typeof network !== 'undefined' && network) {
-        clearInterval(checkInterval);
-        addControls();
-        network.once('stabilizationIterationsDone', function() {
-          setTimeout(function() { runAnimation(); }, 300);
-        });
-      }
-    }, 100);
-  }
-})();
-</script>
+  // Add controls and auto-start
+  addControls();
+  setTimeout(function() {{ runAnimation(); }}, 1500);
 """
-
-    inject = '<div style="position:relative;">' + animation_js + '</body>'
-    return html.replace('</body>', inject)

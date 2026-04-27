@@ -30,3 +30,4 @@ financial_kg/data/snapshots/
 
 # Node (if any)
 node_modules/
+*.xlsx
