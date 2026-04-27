@@ -465,14 +465,16 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
   var totalNodes = animData.totalNodes;
 
   // ── State ──────────────────────────────────────────────────────────
+  // State: full node/edge objects stored for depth filtering
+  var allNodeMap = Object.create(null);
+  var allEdgeList = [];
+  myChart.getOption().series[0].data.forEach(function(n) {{ allNodeMap[n.id] = n; }});
+  myChart.getOption().series[0].links.forEach(function(e) {{ allEdgeList.push(e); }});
+
   var currentDepth = maxHop;
   var speedMultiplier = {speed_safe};
   var animTimers = [];
   var animRunning = false;
-
-  // All nodes + edges (always visible by default, filtered by depth)
-  var allNodes = [];
-  var allEdges = [];
 
   function clearTimers() {{
     animTimers.forEach(function(t) {{ clearTimeout(t); }});
@@ -487,27 +489,27 @@ def _build_animation_js(anim_data_json: str, speed: float) -> str:
 
     // Cell nodes with hop <= depth
     for (var hop = 0; hop <= depth; hop++) {{
-      (nodesByHop[hop] || []).forEach(function(id) {{ showNodes.push(id); }});
+      (nodesByHop[hop] || []).forEach(function(id) {{ if (allNodeMap[id]) showNodes.push(allNodeMap[id]); }});
       (edgesByHop[hop] || []).forEach(function(e) {{ showEdges.push(e); }});
     }}
     // Always show indicator summary nodes (hop=-1)
     if (nodesByHop[-1]) {{
-      nodesByHop[-1].forEach(function(id) {{ showNodes.push(id); }});
+      nodesByHop[-1].forEach(function(id) {{ if (allNodeMap[id]) showNodes.push(allNodeMap[id]); }});
     }}
-    // Always show indicator-to-cell edges (hop=-1)
+    // Indicator-to-cell edges reference existing cell nodes already included
+    // or can be added if their source/target is visible
     if (edgesByHop[-1]) {{
-      edgesByHop[-1].forEach(function(e) {{ showEdges.push(e); }});
+      edgesByHop[-1].forEach(function(e) {{
+        if (allNodeMap[e.source] || allNodeMap[e.target]) {{
+          showEdges.push(e);
+        }}
+      }});
     }}
 
     myChart.setOption({{
       series: [{{
-        data: showNodes.map(function(id) {{
-          var orig = myChart.getOption().series[0].data.find(function(n) {{ return n.id === id; }});
-          return orig || {{}};
-        }}),
-        links: showEdges.map(function(e) {{
-          return {{ source: e.source, target: e.target }};
-        }}),
+        data: showNodes,
+        links: showEdges,
       }}],
     }});
 
